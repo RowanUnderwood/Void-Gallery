@@ -1,0 +1,1076 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Tunnel - Priority Queue</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; user-select: none; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        #loading-overlay {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: white; font-size: 24px; font-weight: bold; pointer-events: none;
+            opacity: 1; transition: opacity 0.5s; background: rgba(0,0,0,0.7);
+            padding: 20px; border-radius: 10px; text-align: center;
+        }
+        #loading-subtext { display: block; font-size: 14px; margin-top: 10px; color: #aaa; font-weight: normal; }
+        .instructions {
+            position: absolute; bottom: 20px; left: 20px; color: rgba(255, 255, 255, 0.5);
+            font-size: 12px; pointer-events: none; text-shadow: 1px 1px 2px black;
+        }
+        .custom-file-input { display: none; }
+        
+        #stats-container { 
+            position: absolute; top: 0; left: 0; z-index: 100;
+            transform: scale(4); 
+            transform-origin: top left;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+    <div id="stats-container"></div>
+    <div id="loading-overlay">Loading...<div id="loading-subtext">Initializing...</div></div>
+    <div class="instructions">Press 'H' to toggle Settings | Drag & Drop images</div>
+    <input type="file" id="image-uploader" class="custom-file-input" multiple accept="image/*">
+
+    <script type="importmap">
+        { "imports": { 
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js", 
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/", 
+            "lil-gui": "https://unpkg.com/lil-gui@0.19.1/dist/lil-gui.esm.min.js" 
+        } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import GUI from 'lil-gui';
+        import Stats from 'three/addons/libs/stats.module.js';
+
+        // --- Configuration & Defaults ---
+        const config = {
+            mode: 'floating', // floating, tunnel, grid
+            showStats: false,
+            
+            // Shared Active Settings (Now includes Lighting/Performance)
+            cameraSpeed: 1.0, 
+            fogDensity: 0.0035, 
+            lightSpeed: 1.0,
+            lightIntensity: 1500,
+            lightColorMode: 'white',
+            lightCount: 15,
+            maxUploadsPerFrame: 2,
+
+            // Floating/Tunnel Settings
+            tunnelRadius: 85.0,
+            imageSize: 60.0,       
+            totalImages: 20,
+            tunnelRows: 5,        
+            wobbleStrength: 0.5,
+            wobbleSpeed: 0.5,
+            ambientIntensity: 0.5,
+            
+            rotationSpeed: 0.1,
+            opacity: 1.0,
+            noRotation: true,
+            tunnelRotation: 0, 
+
+            // --- Grid Mode Settings ---
+            gridCols: 6,
+            gridRows: 4,
+            gridSpacing: 400, 
+            pathRandomness: 0.3, 
+            gridEdgeBuffer: 2, 
+            
+            // Globals
+            serverPath: 'transparentimages',
+            quality: 'full',
+            serverExt: '.webp',
+            serverStart: 1,
+            serverEnd: 1075,
+            
+            // Actions
+            uploadImages: () => document.getElementById('image-uploader').click(),
+            loadSequence: () => textureManager.loadNumberedSequence(),
+            clearImages: () => textureManager.clearUserTextures(),
+            saveSettings: () => saveConfigToFile()
+        };
+
+        // --- Mode Memory Storage ---
+        // UPDATED: Now includes light/performance settings per mode
+        let modeStore = {
+            floating: {
+                cameraSpeed: 1.0, fogDensity: 0.0035, tunnelRadius: 85.0, imageSize: 60.0,
+                tunnelRows: 5, totalImages: 20, rotationSpeed: 0.1, noRotation: false,
+                tunnelRotation: 0, lightCount: 15, ambientIntensity: 0.5,
+                gridCols: 6, gridRows: 4, gridSpacing: 400, pathRandomness: 0.3, gridEdgeBuffer: 2,
+                lightSpeed: 1.0, lightIntensity: 1500, lightColorMode: 'white', maxUploadsPerFrame: 2
+            },
+            tunnel: {
+                cameraSpeed: 1.0, fogDensity: 0.0025, tunnelRadius: 85.0, imageSize: 60.0,
+                tunnelRows: 10, totalImages: 10, rotationSpeed: 0.1, noRotation: true,
+                tunnelRotation: 270, lightCount: 2, ambientIntensity: 0.2,
+                gridCols: 6, gridRows: 4, gridSpacing: 400, pathRandomness: 0.3, gridEdgeBuffer: 2,
+                lightSpeed: 5.0, lightIntensity: 800, lightColorMode: 'random', maxUploadsPerFrame: 1
+            },
+            grid: {
+                cameraSpeed: 1.5, fogDensity: 0.0015, tunnelRadius: 85.0, imageSize: 50.0,
+                tunnelRows: 5, totalImages: 20, rotationSpeed: 0.0, noRotation: true,
+                tunnelRotation: 0, lightCount: 5, ambientIntensity: 0.5,
+                gridCols: 8, gridRows: 6, gridSpacing: 300, pathRandomness: 0.5, gridEdgeBuffer: 2,
+                lightSpeed: 2.0, lightIntensity: 1500, lightColorMode: 'white', maxUploadsPerFrame: 4
+            }
+        };
+
+        // UPDATED: Added new keys to state tracking
+        const stateKeys = [
+            'cameraSpeed', 'fogDensity', 'tunnelRadius', 'imageSize', 
+            'tunnelRows', 'totalImages', 'rotationSpeed', 'noRotation', 
+            'tunnelRotation', 'lightCount', 'ambientIntensity',
+            'gridCols', 'gridRows', 'gridSpacing', 'pathRandomness', 'gridEdgeBuffer',
+            'lightSpeed', 'lightIntensity', 'lightColorMode', 'maxUploadsPerFrame'
+        ];
+
+        // --- Globals ---
+        let scene, camera, renderer, stats, imageCards = [], lights = [], clock = new THREE.Clock();
+        let ambientLight;
+        const imageLoader = new THREE.ImageLoader();
+
+        // Optimized Shared Geometry
+        const sharedPlaneGeometry = new THREE.PlaneGeometry(1, 1);
+
+        // Interaction
+        const mouse = new THREE.Vector2();
+        
+        let isRunning = false;
+        let guiControllers = {};
+        let textureUploadQueue = [];
+        
+        let currentModeName = config.mode; 
+        
+        // Priority Spawn System
+        let spawnQueue = []; 
+        
+        let tunnelGeometry = null;
+        let tunnelGrid = { rows: 0, cols: 0, rowHeight: 0, totalDepth: 0 };
+
+        // Grid Mode Globals
+        let gridLayers = []; 
+        let currentGridTarget = new THREE.Vector3(0, 0, 0);
+        let nextGridTargetIndex = { c: 0, r: 0 };
+
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const loadingSubtext = document.getElementById('loading-subtext');
+
+        function showLoading(msg, sub = "") {
+            loadingOverlay.childNodes[0].nodeValue = msg;
+            loadingSubtext.innerText = sub;
+            loadingOverlay.style.opacity = 1;
+        }
+        function hideLoading() { loadingOverlay.style.opacity = 0; }
+        
+        // --- Save / Load System ---
+        function saveConfigToFile() {
+            // Save active settings to current mode store before export
+            stateKeys.forEach(key => {
+                modeStore[config.mode][key] = config[key];
+            });
+
+            const exportData = {
+                version: 1.6,
+                savedAt: Date.now(),
+                activeMode: config.mode,
+                globals: {
+                    serverPath: config.serverPath,
+                    quality: config.quality,
+                    serverStart: config.serverStart,
+                    serverEnd: config.serverEnd,
+                    showStats: config.showStats
+                    // REMOVED: light/upload settings are no longer global
+                },
+                modes: modeStore
+            };
+
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportData, null, 2));
+            const dlAnchorElem = document.createElement('a');
+            dlAnchorElem.setAttribute("href", dataStr);
+            dlAnchorElem.setAttribute("download", "tunnel_config.json");
+            document.body.appendChild(dlAnchorElem);
+            dlAnchorElem.click();
+            dlAnchorElem.remove();
+        }
+
+        async function loadConfigFromServer() {
+            try {
+                // ADDED: Cache buster to force fresh file load
+                const response = await fetch(`./tunnel_config.json?t=${Date.now()}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    applyConfiguration(data);
+                }
+            } catch (e) {
+                console.log("Config load skipped or failed:", e);
+            }
+        }
+
+        function applyConfiguration(data) {
+            if (data.globals) Object.assign(config, data.globals);
+            
+            if (data.modes) {
+                for (const modeName in data.modes) {
+                    if (modeStore[modeName]) {
+                        // Merge loaded data into modeStore
+                        Object.assign(modeStore[modeName], data.modes[modeName]);
+                    }
+                }
+            }
+            
+            if (data.activeMode) {
+                config.mode = data.activeMode;
+                currentModeName = data.activeMode; 
+            }
+            
+            // Apply settings from the newly active mode
+            const currentSettings = modeStore[config.mode];
+            if (currentSettings) {
+                stateKeys.forEach(key => {
+                    if (currentSettings[key] !== undefined) config[key] = currentSettings[key];
+                });
+            }
+        }
+
+        // --- Texture Manager ---
+        class TextureManager {
+            constructor() {
+                this.masterList = []; 
+                this.playDeck = [];   
+                this.textureBuffer = [];  
+                this.maxBufferSize = 75; 
+                this.preloadTarget = 0;   
+                this.onReadyCallback = null;
+            }
+
+            shuffle(array) {
+                for (let i = array.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [array[i], array[j]] = [array[j], array[i]];
+                }
+                return array;
+            }
+
+            // UPDATED: Now allows duplicates only if we don't have enough images to fill the buffer
+            refillDeck() {
+                if (this.masterList.length === 0) return;
+
+                // Determine target deck size. We want enough cards to at least fill the buffer.
+                // maxBufferSize is usually around 75+. 
+                const targetDeckSize = Math.max(this.masterList.length, this.maxBufferSize);
+
+                this.playDeck = [];
+
+                if (this.masterList.length >= targetDeckSize) {
+                    // We have plenty of images, just copy the master list (No Duplicates)
+                    this.playDeck = [...this.masterList];
+                } else {
+                    // We don't have enough unique images.
+                    // Repeat the master list until we have enough cards to fill the deck.
+                    while (this.playDeck.length < targetDeckSize) {
+                        this.playDeck.push(...this.masterList);
+                    }
+                }
+
+                this.shuffle(this.playDeck);
+            }
+
+            addUserTexture(file) { 
+                const url = URL.createObjectURL(file);
+                this.masterList.push(url); 
+                this.loadTextureFromUrl(url); 
+            }
+
+            loadTextureFromUrl(url) {
+                imageLoader.load(url, (image) => {
+                    const tex = new THREE.Texture(image);
+                    tex.colorSpace = THREE.SRGBColorSpace;
+                    const ratio = image.width / image.height;
+                    
+                    this.textureBuffer.push({ texture: tex, ratio: ratio, pendingUpload: true });
+                    
+                    if (this.onReadyCallback) {
+                        showLoading("Loading...", `${this.textureBuffer.length} / ${this.preloadTarget}`);
+                        if (this.textureBuffer.length >= this.preloadTarget || 
+                           (this.playDeck.length === 0 && this.masterList.length === 0) ||
+                           this.textureBuffer.length >= this.maxBufferSize) {
+                            this.onReadyCallback();
+                            this.onReadyCallback = null;
+                        }
+                    }
+                    this.refillBuffer();
+                }, undefined, (err) => { 
+                    console.warn("Failed to load:", url);
+                    setTimeout(() => this.refillBuffer(), 100);
+                });
+            }
+
+            async loadNumberedSequence() {
+                this.clearUserTextures();
+                try {
+                    const configUrl = `./${config.serverPath}/config.json`;
+                    const response = await fetch(configUrl);
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (data.totalImages) {
+                            config.serverEnd = data.totalImages;
+                            if (guiControllers.serverEnd) guiControllers.serverEnd.updateDisplay();
+                        }
+                    }
+                } catch (e) {}
+
+                this.masterList = [];
+                let folderPath = `./${config.serverPath}`;
+                if (config.quality === 'half') folderPath += '/halfres';
+                else if (config.quality === 'quarter') folderPath += '/quarterres';
+                folderPath += '/';
+                const ext = '.webp'; 
+                
+                for (let i = config.serverStart; i <= config.serverEnd; i++) {
+                    this.masterList.push(`${folderPath}${i}${ext}`);
+                }
+                
+                this.refillDeck();
+                this.preloadAndStart();
+            }
+
+            resetAndReload() {
+                this.textureBuffer.forEach(t => t.texture.dispose());
+                this.textureBuffer = [];
+                this.refillDeck(); 
+                this.preloadAndStart();
+            }
+
+            preloadAndStart() {
+                let needed = config.totalImages;
+                if (config.mode === 'tunnel') needed = config.tunnelRows * 10;
+                const cols = config.gridCols || 6;
+                const rows = config.gridRows || 4;
+                if (config.mode === 'grid') needed = (cols * rows) * 2; 
+
+                this.maxBufferSize = Math.max(needed + 10, 75); 
+                this.preloadTarget = Math.min(needed, 10); 
+
+                showLoading("Loading...", `0 / ${this.preloadTarget}`);
+                this.onReadyCallback = () => { startExperience(); };
+
+                if (this.textureBuffer.length >= this.preloadTarget) {
+                    this.onReadyCallback();
+                    this.onReadyCallback = null;
+                    return;
+                }
+                for(let i=0; i<8; i++) this.refillBuffer();
+            }
+
+            clearUserTextures() {
+                this.masterList = [];
+                this.playDeck = [];
+                this.textureBuffer.forEach(t => t.texture.dispose());
+                this.textureBuffer = [];
+            }
+
+            refillBuffer() {
+                if (this.textureBuffer.length >= this.maxBufferSize) return;
+                if (this.playDeck.length === 0) {
+                    if (this.masterList.length > 0) this.refillDeck();
+                    else return;
+                }
+                const nextUrl = this.playDeck.shift();
+                if(nextUrl) this.loadTextureFromUrl(nextUrl);
+            }
+
+            getTextureFromBuffer() {
+                setTimeout(() => this.refillBuffer(), 0);
+                if (this.textureBuffer.length > 0) {
+                    const data = this.textureBuffer.shift();
+                    if (data.pendingUpload) {
+                        textureUploadQueue.push(data.texture);
+                        data.pendingUpload = false;
+                    }
+                    return data;
+                }
+                return null; 
+            }
+        }
+
+        const textureManager = new TextureManager();
+
+        async function init() {
+            await loadConfigFromServer();
+
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, config.fogDensity);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 3000);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); 
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+            
+            stats = new Stats();
+            document.getElementById('stats-container').appendChild(stats.dom);
+            stats.dom.style.display = config.showStats ? 'block' : 'none';
+
+            ambientLight = new THREE.AmbientLight(0xffffff, config.ambientIntensity);
+            scene.add(ambientLight);
+
+            setupLights();
+            setupGUI();
+            setupEvents();
+            
+            textureManager.loadNumberedSequence();
+        }
+
+        function startExperience() {
+            rebuildScene();
+            hideLoading();
+            if (!isRunning) { isRunning = true; animate(); }
+        }
+
+        function rebuildScene() {
+            spawnQueue = [];
+
+            imageCards.forEach(c => {
+                scene.remove(c.mesh);
+                if (c.mesh.geometry && c.mesh.geometry !== sharedPlaneGeometry && c.mesh.geometry !== tunnelGeometry) {
+                    c.mesh.geometry.dispose();
+                }
+                if (c.mesh.material) safeDisposeMaterial(c.mesh.material);
+            });
+            imageCards = [];
+            
+            gridLayers.forEach(layerGroup => {
+                scene.remove(layerGroup);
+                layerGroup.children.forEach(mesh => {
+                    if(mesh.material) safeDisposeMaterial(mesh.material);
+                });
+            });
+            gridLayers = [];
+
+            textureUploadQueue = [];
+
+            if (tunnelGeometry) {
+                tunnelGeometry.dispose();
+                tunnelGeometry = null;
+            }
+
+            camera.position.set(0,0,0);
+            camera.rotation.set(0,0,0);
+
+            if (config.mode === 'floating') {
+                for (let i = 0; i < config.totalImages; i++) spawnFloatingImage(true);
+            } else if (config.mode === 'tunnel') {
+                setupTunnelGrid();
+            } else if (config.mode === 'grid') {
+                setupGridSystem();
+            }
+            updateGUIVisibility();
+        }
+        
+        function safeDisposeMaterial(mat) {
+            if (mat.map) mat.map.dispose();
+            mat.dispose();
+        }
+
+        // --- Priority Spawn Logic ---
+        function processSpawnQueue() {
+            if (spawnQueue.length === 0) return;
+            
+            spawnQueue.sort((a, b) => {
+                const zA = a.parent ? a.parent.position.z + a.z : a.z;
+                const zB = b.parent ? b.parent.position.z + b.z : b.z;
+                return zB - zA;
+            });
+
+            let textureData = textureManager.getTextureFromBuffer();
+            
+            while (textureData && spawnQueue.length > 0) {
+                const task = spawnQueue.shift(); 
+                
+                const material = new THREE.MeshLambertMaterial({ 
+                    map: textureData.texture, side: THREE.DoubleSide, transparent: true,
+                    opacity: config.opacity, depthWrite: false, depthTest: true
+                });
+
+                let mesh;
+
+                if (task.type === 'tunnel') {
+                    const geo = tunnelGeometry.clone(); 
+                    mesh = new THREE.Mesh(geo, material);
+                    mesh.position.set(task.x, task.y, task.z);
+                    mesh.rotation.z = task.rotationZ;
+                    updateTileUVs(mesh, textureData.ratio, task.colIndex);
+                } else {
+                    let w = task.w; 
+                    let h = task.h;
+                    if (textureData.ratio > 1) h = w / textureData.ratio;
+                    else w = h * textureData.ratio;
+
+                    mesh = new THREE.Mesh(sharedPlaneGeometry, material);
+                    mesh.scale.set(w, h, 1);
+                    mesh.position.set(task.x, task.y, task.z);
+                    if (task.rotation) mesh.rotation.copy(task.rotation);
+                }
+                
+                if (task.parent) task.parent.add(mesh);
+                else scene.add(mesh);
+                
+                if (task.onComplete) task.onComplete(mesh);
+
+                textureData = textureManager.getTextureFromBuffer();
+            }
+        }
+
+        // --- Grid Logic ---
+        function setupGridSystem() {
+            if (!config.gridCols) config.gridCols = 6;
+            if (!config.gridRows) config.gridRows = 4;
+            if (!config.gridSpacing) config.gridSpacing = 400;
+            if (!config.imageSize) config.imageSize = 60;
+
+            const layersToSpawn = 5;
+            
+            nextGridTargetIndex = {
+                c: Math.floor(config.gridCols / 2),
+                r: Math.floor(config.gridRows / 2)
+            };
+            
+            currentGridTarget.set(0,0,0);
+            calculateTargetPosition(nextGridTargetIndex);
+
+            if (!isNaN(currentGridTarget.x)) {
+                camera.position.x = currentGridTarget.x;
+                camera.position.y = currentGridTarget.y;
+            } else {
+                camera.position.set(0,0,0);
+            }
+
+            for(let i=0; i<layersToSpawn; i++) {
+                spawnGridLayer(i * -config.gridSpacing - 400); 
+            }
+        }
+
+        function spawnGridLayer(zPos) {
+            const group = new THREE.Group();
+            group.position.z = zPos;
+            createGridTasks(group);
+            scene.add(group);
+            gridLayers.push(group);
+        }
+
+        function recycleGridLayer(group) {
+            let minZ = 0;
+            gridLayers.forEach(g => { if(g.position.z < minZ) minZ = g.position.z; });
+            
+            group.position.z = minZ - config.gridSpacing;
+
+            for (let i = group.children.length - 1; i >= 0; i--) {
+                const mesh = group.children[i];
+                if (mesh.material) safeDisposeMaterial(mesh.material);
+                group.remove(mesh);
+            }
+
+            spawnQueue = spawnQueue.filter(task => task.parent !== group);
+            createGridTasks(group);
+            pickNextTarget();
+        }
+
+        function createGridTasks(group) {
+            const cols = config.gridCols || 6;
+            const rows = config.gridRows || 4;
+            const size = config.imageSize || 60;
+
+            const totalWidth = cols * size;
+            const totalHeight = rows * size;
+            const offX = (totalWidth / 2) - (size / 2);
+            const offY = (totalHeight / 2) - (size / 2);
+
+            const centerC = Math.floor(cols / 2);
+            const centerR = Math.floor(rows / 2);
+
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const x = (c * size) - offX;
+                    const y = (r * size) - offY;
+                    const dist = Math.sqrt(Math.pow(c - centerC, 2) + Math.pow(r - centerR, 2));
+                    
+                    spawnQueue.push({
+                        type: 'grid',
+                        parent: group,
+                        x: x, y: y, z: 0,
+                        w: size, h: size,
+                        dist: dist 
+                    });
+                }
+            }
+        }
+
+        function pickNextTarget() {
+            const cols = config.gridCols || 6;
+            const rows = config.gridRows || 4;
+            const margin = config.gridEdgeBuffer || 0; 
+            const maxDevC = Math.max(1, Math.round(cols * (config.pathRandomness || 0.3)));
+            const maxDevR = Math.max(1, Math.round(rows * (config.pathRandomness || 0.3)));
+            const stepC = Math.floor(Math.random() * (maxDevC * 2 + 1)) - maxDevC;
+            const stepR = Math.floor(Math.random() * (maxDevR * 2 + 1)) - maxDevR;
+            let nextC = nextGridTargetIndex.c + stepC;
+            let nextR = nextGridTargetIndex.r + stepR;
+            if (cols > margin * 2) { nextC = Math.max(margin, Math.min(cols - 1 - margin, nextC)); } 
+            else { nextC = Math.max(0, Math.min(cols - 1, nextC)); }
+            if (rows > margin * 2) { nextR = Math.max(margin, Math.min(rows - 1 - margin, nextR)); } 
+            else { nextR = Math.max(0, Math.min(rows - 1, nextR)); }
+            nextGridTargetIndex = { c: nextC, r: nextR };
+            calculateTargetPosition(nextGridTargetIndex);
+        }
+
+        function calculateTargetPosition(indices) {
+            const cols = config.gridCols || 6;
+            const rows = config.gridRows || 4;
+            const size = config.imageSize || 60;
+            const totalWidth = cols * size;
+            const totalHeight = rows * size;
+            const offX = (totalWidth / 2) - (size / 2);
+            const offY = (totalHeight / 2) - (size / 2);
+            const x = (indices.c * size) - offX;
+            const y = (indices.r * size) - offY;
+            currentGridTarget.set(x, y, 0);
+        }
+
+        // --- Floating Mode ---
+        function spawnFloatingImage(randomZ = false) {
+            const angle = Math.random() * Math.PI * 2;
+            const r = (Math.random() * 0.5 + 0.5) * config.tunnelRadius;
+            const z = randomZ ? -Math.random() * 1000 : -1000;
+            
+            const rot = new THREE.Euler();
+            if (!config.noRotation) rot.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
+            else rot.set(0,0,0);
+
+            spawnQueue.push({
+                type: 'floating',
+                x: Math.cos(angle) * r, 
+                y: Math.sin(angle) * r, 
+                z: z,
+                w: config.imageSize, 
+                h: config.imageSize,
+                rotation: rot,
+                onComplete: (mesh) => {
+                    imageCards.push({
+                        mesh: mesh,
+                        rotationSpeed: new THREE.Vector3((Math.random()-0.5)*config.rotationSpeed, (Math.random()-0.5)*config.rotationSpeed, (Math.random()-0.5)*config.rotationSpeed),
+                        velocity: (Math.random() * 0.5 + 1.0)
+                    });
+                }
+            });
+        }
+
+        // --- Tunnel Mode ---
+        function setupTunnelGrid() {
+            const circumference = 2 * Math.PI * config.tunnelRadius;
+            const approxWidth = config.imageSize * 1.2;
+            const cols = Math.floor(circumference / approxWidth);
+            const segmentAngle = (Math.PI * 2) / cols;
+            const rowHeight = config.imageSize * 1.2;
+            
+            const rows = config.tunnelRows;
+            
+            tunnelGrid = {
+                cols: cols, rows: rows, rowHeight: rowHeight, segmentAngle: segmentAngle,
+                totalDepth: rows * rowHeight,
+                cellWidth: segmentAngle * config.tunnelRadius
+            };
+
+            const gap = 0.95;
+            tunnelGeometry = new THREE.CylinderGeometry(
+                config.tunnelRadius, config.tunnelRadius, config.imageSize, 
+                16, 1, true, -(segmentAngle * gap) / 2, segmentAngle * gap
+            );
+            tunnelGeometry.rotateX(Math.PI / 2); 
+            
+            const uvs = tunnelGeometry.attributes.uv;
+            let minU = Infinity, maxU = -Infinity;
+            for(let i=0; i<uvs.count; i++) {
+                minU = Math.min(minU, uvs.getX(i));
+                maxU = Math.max(maxU, uvs.getX(i));
+            }
+            const range = maxU - minU;
+            if (range > 0) {
+                for(let i=0; i<uvs.count; i++) {
+                    uvs.setX(i, (uvs.getX(i) - minU) / range);
+                }
+            }
+            tunnelGeometry.userData.baseUVs = Float32Array.from(uvs.array);
+
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    spawnTunnelTask(r, c);
+                }
+            }
+        }
+
+        function spawnTunnelTask(row, col) {
+            const zPos = - (row * tunnelGrid.rowHeight);
+            const rotationZ = (col * tunnelGrid.segmentAngle) + Math.PI / 2;
+
+            spawnQueue.push({
+                type: 'tunnel',
+                x: 0, y: 0, z: zPos,
+                rotationZ: rotationZ,
+                colIndex: col,
+                onComplete: (mesh) => {
+                    imageCards.push({ mesh, colIndex: col });
+                }
+            });
+        }
+
+        function updateTileUVs(mesh, ratio, colIndex) {
+            const baseUVs = mesh.geometry.userData.baseUVs || tunnelGeometry.userData.baseUVs;
+            const uvs = mesh.geometry.attributes.uv;
+            uvs.array.set(baseUVs);
+
+            let baseRot = config.tunnelRotation;
+            const angle = (colIndex * tunnelGrid.segmentAngle) % (Math.PI * 2);
+            let flip = false;
+            if (angle > Math.PI / 2 && angle < 3 * Math.PI / 2) flip = true;
+            if (flip) baseRot += 180;
+
+            let effectiveRatio = ratio;
+            const totalRot = (baseRot % 360);
+            
+            const isPortrait = Math.abs((totalRot % 180) - 90) < 1; 
+            if (isPortrait) effectiveRatio = 1 / ratio;
+
+            const cellRatio = tunnelGrid.cellWidth / config.imageSize;
+            let scaleX = 1, scaleY = 1;
+
+            if (effectiveRatio > cellRatio) scaleY = (tunnelGrid.cellWidth / effectiveRatio) / config.imageSize;
+            else scaleX = (config.imageSize * effectiveRatio) / tunnelGrid.cellWidth;
+
+            const rX = scaleX; 
+            const rY = scaleY;
+
+            for (let i = 0; i < uvs.count; i++) {
+                let u = uvs.getX(i);
+                let v = uvs.getY(i);
+                u = 1 - u; 
+                let r = (baseRot % 360 + 360) % 360;
+                if (r === 90) { const t = u; u = v; v = 1 - t; }
+                else if (r === 180) { u = 1 - u; v = 1 - v; }
+                else if (r === 270) { const t = u; u = 1 - v; v = t; }
+                u = u * rX + (1 - rX) / 2;
+                v = v * rY + (1 - rY) / 2;
+                uvs.setXY(i, u, v);
+            }
+            uvs.needsUpdate = true;
+        }
+
+        // --- Animation ---
+        function animate() {
+            requestAnimationFrame(animate);
+            stats.update();
+            const dt = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            processSpawnQueue();
+
+            let uploadCount = 0;
+            while (textureUploadQueue.length > 0 && uploadCount < config.maxUploadsPerFrame) {
+                const tex = textureUploadQueue.shift();
+                tex.needsUpdate = true; 
+                if (renderer) renderer.initTexture(tex);
+                uploadCount++;
+            }
+            
+            // Mouse Parallax Logic
+            const parallaxStrength = 0.05;
+            
+            if (config.mode === 'floating') {
+                let targetX = Math.sin(time * config.wobbleSpeed) * config.wobbleStrength * 5;
+                let targetY = Math.cos(time * config.wobbleSpeed * 0.7) * config.wobbleStrength * 3;
+                
+                targetX += (mouse.x * 20 - targetX) * parallaxStrength;
+                targetY += (mouse.y * 20 - targetY) * parallaxStrength;
+
+                camera.position.x += (targetX - camera.position.x) * 0.1;
+                camera.position.y += (targetY - camera.position.y) * 0.1;
+                camera.rotation.z = Math.sin(time * config.wobbleSpeed * 0.3) * 0.1 * config.wobbleStrength;
+
+                for (let i = imageCards.length - 1; i >= 0; i--) {
+                    const card = imageCards[i];
+                    card.mesh.position.z += config.cameraSpeed * card.velocity * dt * 10;
+                    if (!config.noRotation) {
+                        card.mesh.rotation.x += card.rotationSpeed.x * dt;
+                        card.mesh.rotation.y += card.rotationSpeed.y * dt;
+                        card.mesh.rotation.z += card.rotationSpeed.z * dt;
+                    } else card.mesh.rotation.set(0,0,0);
+                    
+                    if (card.mesh.position.z > 50) {
+                        scene.remove(card.mesh);
+                        safeDisposeMaterial(card.mesh.material);
+                        imageCards.splice(i, 1);
+                        spawnFloatingImage(); 
+                    }
+                }
+            } else if (config.mode === 'tunnel') {
+                let targetX = Math.sin(time * config.wobbleSpeed) * config.wobbleStrength * 5;
+                let targetY = Math.cos(time * config.wobbleSpeed * 0.7) * config.wobbleStrength * 3;
+                
+                targetX += (mouse.x * 10 - targetX) * parallaxStrength;
+                targetY += (mouse.y * 10 - targetY) * parallaxStrength;
+
+                camera.position.x += (targetX - camera.position.x) * 0.1;
+                camera.position.y += (targetY - camera.position.y) * 0.1;
+                
+                camera.rotation.z = Math.sin(time * config.wobbleSpeed * 0.3) * 0.1 * config.wobbleStrength;
+
+                const moveDist = config.cameraSpeed * dt * 30; 
+                
+                for (let i = imageCards.length - 1; i >= 0; i--) {
+                    const card = imageCards[i];
+                    card.mesh.position.z += moveDist;
+                    
+                    if (card.mesh.position.z > 50) {
+                        const currentZ = card.mesh.position.z;
+                        const newZ = currentZ - tunnelGrid.totalDepth - moveDist; 
+                        const col = card.colIndex;
+                        
+                        scene.remove(card.mesh);
+                        if (card.mesh.material) safeDisposeMaterial(card.mesh.material);
+                        imageCards.splice(i, 1);
+
+                        spawnQueue.push({
+                            type: 'tunnel',
+                            x: 0, y: 0, z: newZ,
+                            rotationZ: (col * tunnelGrid.segmentAngle) + Math.PI / 2,
+                            colIndex: col,
+                            onComplete: (mesh) => { imageCards.push({ mesh, colIndex: col }); }
+                        });
+                    }
+                }
+            } else if (config.mode === 'grid') {
+                const moveDist = config.cameraSpeed * dt * 100;
+                
+                if (!isNaN(currentGridTarget.x) && !isNaN(currentGridTarget.y)) {
+                    const lookX = currentGridTarget.x + (mouse.x * 50);
+                    const lookY = currentGridTarget.y + (mouse.y * 50);
+                    camera.position.x += (lookX - camera.position.x) * dt * (config.cameraSpeed * 0.5);
+                    camera.position.y += (lookY - camera.position.y) * dt * (config.cameraSpeed * 0.5);
+                }
+
+                gridLayers.forEach(group => {
+                    group.position.z += moveDist;
+                    if (group.position.z > 150) { 
+                        recycleGridLayer(group);
+                    }
+                });
+            }
+
+            lights.forEach(l => {
+                l.mesh.position.z += config.lightSpeed * 1.5 * dt * 10;
+                l.light.position.copy(l.mesh.position);
+                if (l.mesh.position.z > 100) {
+                    l.mesh.position.z = -1000 - Math.random() * 200;
+                    l.mesh.position.set((Math.random()*2-1)*config.tunnelRadius, (Math.random()*2-1)*config.tunnelRadius, l.mesh.position.z);
+                    l.light.position.copy(l.mesh.position);
+                }
+            });
+            scene.fog.density = config.fogDensity;
+            renderer.render(scene, camera);
+        }
+
+        function setupLights() {
+            lights.forEach(l => { scene.remove(l.mesh); scene.remove(l.light); });
+            lights = [];
+            for (let i = 0; i < config.lightCount; i++) createMovingLight();
+        }
+
+        function createMovingLight() {
+            const color = config.lightColorMode === 'random' ? new THREE.Color().setHSL(Math.random(), 1, 0.5) : new THREE.Color(0xffffff);
+            const light = new THREE.PointLight(color, config.lightIntensity, 600);
+            const mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 8, 8), new THREE.MeshBasicMaterial({ color: color }));
+            const angle = Math.random() * Math.PI * 2;
+            const radius = Math.random() * config.tunnelRadius * 0.8;
+            mesh.position.set(Math.cos(angle) * radius, Math.sin(angle) * radius, -Math.random() * 1000);
+            light.position.copy(mesh.position);
+            scene.add(mesh); scene.add(light);
+            lights.push({ mesh, light });
+        }
+
+        function handleModeChange(newMode) {
+            // 1. SAVE to OLD mode
+            const previousSettings = modeStore[currentModeName];
+            stateKeys.forEach(key => {
+                if (config[key] !== undefined) {
+                    previousSettings[key] = config[key];
+                }
+            });
+
+            // 2. SWITCH
+            currentModeName = newMode;
+
+            // 3. LOAD from NEW mode
+            const targetSettings = modeStore[newMode];
+            stateKeys.forEach(key => {
+                if (targetSettings[key] !== undefined) {
+                    config[key] = targetSettings[key];
+                }
+            });
+
+            // 4. UPDATE
+            if (ambientLight) ambientLight.intensity = config.ambientIntensity; 
+            setupLights(); // Re-run lights setup since count/color/intensity might change
+            
+            for (const key in guiControllers) {
+                if(guiControllers[key]) guiControllers[key].updateDisplay();
+            }
+            
+            rebuildScene();
+        }
+
+        function setupGUI() {
+            const gui = new GUI({ title: 'Settings' });
+            
+            gui.add(config, 'mode', ['floating', 'tunnel', 'grid']).name('Display Mode').onChange(v => {
+               handleModeChange(v);
+            });
+
+            const folderGen = gui.addFolder('General');
+            folderGen.add(config, 'showStats').name('Show Performance').onChange(v => stats.dom.style.display = v ? 'block' : 'none');
+            // MOVED: maxUploadsPerFrame is now in "Performance / Light" folder (per mode)
+            folderGen.add(config, 'saveSettings').name('💾 Save Config');
+
+            guiControllers.cameraSpeed = folderGen.add(config, 'cameraSpeed', 0.1, 4.0).name('Speed');
+            guiControllers.fogDensity = folderGen.add(config, 'fogDensity', 0, 0.01).name('Fog Density');
+            
+            const folderGeom = gui.addFolder('Geometry');
+            guiControllers.tunnelRadius = folderGeom.add(config, 'tunnelRadius', 10, 100).name('Tunnel/Float Radius').onChange(() => rebuildScene());
+            guiControllers.imageSize = folderGeom.add(config, 'imageSize', 30, 90).name('Image Size').onChange(() => rebuildScene());
+            guiControllers.tunnelRows = folderGeom.add(config, 'tunnelRows', 1, 50, 1).name('Tunnel Depth').onChange(() => rebuildScene());
+            
+            guiControllers.gridCols = folderGeom.add(config, 'gridCols', 2, 20, 1).name('Grid Width').onChange(() => rebuildScene());
+            guiControllers.gridRows = folderGeom.add(config, 'gridRows', 2, 20, 1).name('Grid Height').onChange(() => rebuildScene());
+            guiControllers.gridSpacing = folderGeom.add(config, 'gridSpacing', 100, 1000, 10).name('Grid Spacing').onChange(() => rebuildScene());
+            guiControllers.pathRandomness = folderGeom.add(config, 'pathRandomness', 0, 1).name('Path Randomness');
+            guiControllers.gridEdgeBuffer = folderGeom.add(config, 'gridEdgeBuffer', 0, 5, 1).name('Edge Buffer');
+
+            guiControllers.totalImages = folderGeom.add(config, 'totalImages', 10, 500, 1)
+                .name('Float Count').onFinishChange(() => textureManager.resetAndReload());
+
+            const folderImg = gui.addFolder('Images');
+            folderImg.add(config, 'quality', ['full', 'half', 'quarter']).name('Resolution').onChange(() => textureManager.loadNumberedSequence());
+            guiControllers.tunnelRotation = folderImg.add(config, 'tunnelRotation', [0, 90, 180, 270]).name('Image Rotation').onChange(() => rebuildScene());
+            guiControllers.spinSpeed = folderImg.add(config, 'rotationSpeed', 0, 5).name('Spin Speed');
+            guiControllers.noRotation = folderImg.add(config, 'noRotation').name('Stop Rotation');
+            folderImg.add(config, 'opacity', 0, 1).onChange(v => {
+                if(config.mode==='grid') gridLayers.forEach(g => g.children.forEach(m => m.material.opacity = v));
+                else imageCards.forEach(c => c.mesh.material.opacity = v)
+            });
+
+            const folderServer = gui.addFolder('Server / Local Images');
+            folderServer.add(config, 'serverPath', ['transparentimages', 'movieposters', 'images', 'AIimages'])
+                .name('Image Folder')
+                .onChange(value => {
+                    config.serverStart = 1;
+                    textureManager.loadNumberedSequence();
+                });
+            
+            const subFolderManual = folderServer.addFolder('Numbered Fallback');
+            subFolderManual.add(config, 'serverStart').name('Start #').listen();
+            guiControllers.serverEnd = subFolderManual.add(config, 'serverEnd').name('End #').listen();
+            subFolderManual.add(config, 'loadSequence').name('🔢 Reload Range');
+            
+            const folderContent = gui.addFolder('Content Actions');
+            folderContent.add(config, 'uploadImages').name('📂 Upload Local Files');
+            folderContent.add(config, 'clearImages').name('❌ Clear All Custom');
+            
+            // UPDATED: Lighting/Performance settings (now per mode)
+            const folderLight = gui.addFolder('Lighting & Performance');
+            guiControllers.lightSpeed = folderLight.add(config, 'lightSpeed', 0, 30);
+            guiControllers.ambientIntensity = folderLight.add(config, 'ambientIntensity', 0, 3).name('Ambient Brightness').onChange(v => {
+                if (ambientLight) ambientLight.intensity = v;
+            });
+            guiControllers.maxUploadsPerFrame = folderLight.add(config, 'maxUploadsPerFrame', 1, 20, 1).name('Textures / Frame');
+
+            guiControllers.lightCount = folderLight.add(config, 'lightCount', 0, 20, 1).onFinishChange(() => setupLights());
+            guiControllers.lightIntensity = folderLight.add(config, 'lightIntensity', 0, 3000).onChange(() => setupLights());
+            guiControllers.lightColorMode = folderLight.add(config, 'lightColorMode', ['random', 'white']).onChange(() => setupLights());
+            
+            gui.close();
+            window.addEventListener('keydown', (e) => { if (e.key.toLowerCase() === 'h') gui.show(gui._hidden); });
+            updateGUIVisibility();
+        }
+
+        function updateGUIVisibility() {
+            if (!guiControllers.spinSpeed) return;
+            guiControllers.spinSpeed.hide();
+            guiControllers.noRotation.hide();
+            guiControllers.tunnelRotation.hide();
+            guiControllers.tunnelRows.hide();
+            guiControllers.totalImages.hide();
+            guiControllers.tunnelRadius.hide();
+            guiControllers.gridCols.hide();
+            guiControllers.gridRows.hide();
+            guiControllers.gridSpacing.hide();
+            guiControllers.pathRandomness.hide();
+            guiControllers.gridEdgeBuffer.hide();
+
+            if (config.mode === 'tunnel') {
+                guiControllers.tunnelRotation.show();
+                guiControllers.tunnelRows.show(); 
+                guiControllers.tunnelRadius.show();
+            } else if (config.mode === 'floating') {
+                guiControllers.spinSpeed.show();
+                guiControllers.noRotation.show();
+                guiControllers.totalImages.show(); 
+                guiControllers.tunnelRadius.show();
+            } else if (config.mode === 'grid') {
+                guiControllers.gridCols.show();
+                guiControllers.gridRows.show();
+                guiControllers.gridSpacing.show();
+                guiControllers.pathRandomness.show();
+                guiControllers.gridEdgeBuffer.show();
+            }
+        }
+
+        function setupEvents() {
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+            
+            // Mouse Listener for Parallax
+            window.addEventListener('mousemove', (e) => {
+                mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+            });
+
+            const fileInput = document.getElementById('image-uploader');
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    textureManager.clearUserTextures();
+                    Array.from(e.target.files).forEach(file => textureManager.addUserTexture(file));
+                }
+            });
+            document.body.addEventListener('dragover', (e) => e.preventDefault());
+            document.body.addEventListener('drop', (e) => {
+                e.preventDefault();
+                if (e.dataTransfer.files.length > 0) {
+                    textureManager.clearUserTextures();
+                    Array.from(e.dataTransfer.files).forEach(file => { if (file.type.startsWith('image/')) textureManager.addUserTexture(file); });
+                }
+            });
+        }
+
+        init();
+    </script>
+</body>
+</html>
