@@ -1,22 +1,25 @@
 {
-  "version": 1.6,
-  "savedAt": 1765980615238,
+  "version": 2.2,
+  "savedAt": 1766181404178,
   "activeMode": "tunnel",
   "globals": {
     "serverPath": "images",
     "quality": "quarter",
     "serverStart": 1,
     "serverEnd": 1075,
-    "showStats": false
+    "showStats": false,
+    "useStereo": false
   },
   "modes": {
     "floating": {
+      "stereoEyeSep": 1.122,
+      "stereoFOVBoost": 30,
       "cameraSpeed": 1,
-      "fogDensity": 0.0035,
-      "tunnelRadius": 85,
+      "fogDensity": 0.00269,
+      "tunnelRadius": 100,
       "imageSize": 60,
       "tunnelRows": 5,
-      "totalImages": 48,
+      "totalImages": 112,
       "rotationSpeed": 0.1,
       "noRotation": true,
       "tunnelRotation": 0,
@@ -30,11 +33,14 @@
       "lightSpeed": 1,
       "lightIntensity": 1500,
       "lightColorMode": "white",
-      "maxUploadsPerFrame": 1
+      "maxUploadsPerFrame": 1,
+      "anisotropyLevel": 1
     },
     "tunnel": {
+      "stereoEyeSep": 0.9,
+      "stereoFOVBoost": 50,
       "cameraSpeed": 1,
-      "fogDensity": 0.00693,
+      "fogDensity": 0.00521,
       "tunnelRadius": 85,
       "imageSize": 35.4,
       "tunnelRows": 10,
@@ -43,7 +49,7 @@
       "noRotation": true,
       "tunnelRotation": 90,
       "lightCount": 6,
-      "ambientIntensity": 1.008,
+      "ambientIntensity": 1.746,
       "gridCols": 6,
       "gridRows": 4,
       "gridSpacing": 400,
@@ -52,9 +58,12 @@
       "lightSpeed": 5,
       "lightIntensity": 800,
       "lightColorMode": "random",
-      "maxUploadsPerFrame": 1
+      "maxUploadsPerFrame": 1,
+      "anisotropyLevel": 16
     },
     "grid": {
+      "stereoEyeSep": 0.8,
+      "stereoFOVBoost": 30,
       "cameraSpeed": 0.2145,
       "fogDensity": 0.0015,
       "tunnelRadius": 85,
@@ -74,7 +83,8 @@
       "lightSpeed": 2,
       "lightIntensity": 1500,
       "lightColorMode": "white",
-      "maxUploadsPerFrame": 1
+      "maxUploadsPerFrame": 1,
+      "anisotropyLevel": 4
     }
   }
 }

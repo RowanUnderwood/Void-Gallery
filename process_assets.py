@@ -43,7 +43,6 @@ def ensure_dirs(base_dir):
 def convert_and_resize(task_info):
     """
     Worker function. Returns (final_filename, original_filename) if successful.
-    task_info: (source_path, filename, paths_dict, is_dry_run)
     """
     src_full_path, filename, paths, is_dry_run = task_info
     
@@ -58,11 +57,9 @@ def convert_and_resize(task_info):
         if is_dry_run:
             return (final_name, filename)
 
-        # Smart Caching: Check modification times
         src_mtime = os.path.getmtime(src_full_path)
         needs_process = True
         
-        # If target exists, check if source is newer
         if os.path.exists(full_res_target):
              dst_mtime = os.path.getmtime(full_res_target)
              if src_mtime <= dst_mtime:
@@ -70,14 +67,11 @@ def convert_and_resize(task_info):
 
         img = None
         
-        # 1. Convert/Copy to Main Directory
-        # This explicit step ensures we convert PNG/JPG -> WEBP before renaming logic touches it
         if needs_process or src_full_path != full_res_target:
              with Image.open(src_full_path) as img_src:
                 if src_full_path != full_res_target:
                     img_src.save(full_res_target, "webp", lossless=True)
         
-        # 2. Generate Half Res (Smart Cache Check)
         half_needs_update = True
         if os.path.exists(half_res_target):
              if os.path.getmtime(full_res_target) <= os.path.getmtime(half_res_target):
@@ -89,14 +83,12 @@ def convert_and_resize(task_info):
             img_half = img.resize((max(1, w // 2), max(1, h // 2)), Image.Resampling.LANCZOS)
             img_half.save(half_res_target, "webp", quality=85)
         
-        # 3. Generate Quarter Res (OPTIMIZED: Chain from Half Res)
         quat_needs_update = True
         if os.path.exists(quat_res_target):
              if os.path.getmtime(half_res_target) <= os.path.getmtime(quat_res_target):
                  quat_needs_update = False
         
         if quat_needs_update:
-            # Load half res to resize down (faster than loading full res)
             if os.path.exists(half_res_target):
                 img_half_src = Image.open(half_res_target)
                 w, h = img_half_src.size
@@ -110,10 +102,7 @@ def convert_and_resize(task_info):
     return (final_name, filename)
 
 def standardize_names_and_fill_gaps(base_dir, manifest):
-    """
-    Renames files to 1.webp, 2.webp... and updates manifest keys.
-    Only touches files ending in .webp.
-    """
+    """Renames files to 1.webp, 2.webp... and preserves manifest history."""
     files = [f for f in os.listdir(base_dir) if f.lower().endswith(TARGET_EXT)]
     
     numbered_map = {} 
@@ -128,7 +117,6 @@ def standardize_names_and_fill_gaps(base_dir, manifest):
             
     existing_nums = sorted(numbered_map.keys())
     
-    # Calculate Total Operations for Progress Bar
     gaps = []
     gap_moves = 0
     if existing_nums:
@@ -152,7 +140,7 @@ def standardize_names_and_fill_gaps(base_dir, manifest):
                 dst_name = f"{gap}{TARGET_EXT}"
                 
                 if perform_rename_set(base_dir, src_name, dst_name):
-                    # Update Manifest
+                    # Maintain the mapping to the original source file
                     if src_name in manifest:
                         manifest[dst_name] = manifest.pop(src_name)
                     pbar.update(1)
@@ -160,24 +148,26 @@ def standardize_names_and_fill_gaps(base_dir, manifest):
                 existing_nums[curr_high] = gap
                 curr_high -= 1
                 
-        # 2. Rename "others"
-        existing_nums = sorted(list(set(existing_nums))) # Re-sort after gap filling
+        # 2. Rename new files ("others")
+        existing_nums = sorted(list(set(existing_nums)))
         next_num = (existing_nums[-1] + 1) if existing_nums else 1
         
         for f in others:
             new_name = f"{next_num}{TARGET_EXT}"
             if perform_rename_set(base_dir, f, new_name):
+                 # Move original file reference to the new numbered key
                  if f in manifest:
                      manifest[new_name] = manifest.pop(f)
+                 else:
+                     # If it wasn't in manifest, it is its own source
+                     manifest[new_name] = f
                  pbar.update(1)
             next_num += 1
 
     return next_num - 1 
 
 def perform_rename_set(base_dir, src_name, dst_name):
-    """Renames files safely."""
     dirs = [base_dir, os.path.join(base_dir, "halfres"), os.path.join(base_dir, "quarterres")]
-    
     if os.path.exists(os.path.join(base_dir, dst_name)):
         return False
 
@@ -192,39 +182,26 @@ def perform_rename_set(base_dir, src_name, dst_name):
                 except OSError as e:
                     print(f"Error renaming {s} -> {t}: {e}")
                     success = False
-            else:
-                pass
     return success
 
 def update_config_and_manifest(base_dir, total_count, manifest):
     if DRY_RUN: return
-    
-    # Save Config
     config_path = os.path.join(base_dir, CONFIG_FILENAME)
-    data = {
-        "totalImages": total_count,
-        "lastUpdated": time.time(),
-        "formats": ["full", "halfres", "quarterres"]
-    }
+    data = {"totalImages": total_count, "lastUpdated": time.time(), "formats": ["full", "halfres", "quarterres"]}
     with open(config_path, 'w') as f:
         json.dump(data, f, indent=4)
         
-    # Save Manifest
     manifest_path = os.path.join(base_dir, MANIFEST_FILENAME)
     with open(manifest_path, 'w') as f:
         json.dump(manifest, f, indent=4)
-        
-    print(f"Updated {config_path}: Total {total_count}")
-    print(f"Updated {manifest_path}")
 
 def process_directory(dir_name):
     print(f"\n--- Processing: {dir_name} ---")
     exists, paths = ensure_dirs(dir_name)
     if not exists: return
 
-    # Load existing manifest if present
-    manifest_path = os.path.join(dir_name, MANIFEST_FILENAME)
     manifest = {}
+    manifest_path = os.path.join(dir_name, MANIFEST_FILENAME)
     if os.path.exists(manifest_path):
         try:
             with open(manifest_path, 'r') as f:
@@ -232,7 +209,6 @@ def process_directory(dir_name):
         except:
             print("Could not load existing manifest, starting fresh.")
 
-    # Gather images
     exts = ['*.png', '*.jpg', '*.jpeg', '*.webp']
     all_files = []
     for ext in exts:
@@ -242,27 +218,26 @@ def process_directory(dir_name):
     all_files = sorted(list(set(all_files)))
     root_files = [f for f in all_files if os.path.dirname(f) == dir_name]
     
-    # --- VITAL FIX: Filter out already processed sources ---
-    # This prevents the script from re-converting 'img.jpg' -> 'img.webp'
-    # if 'img.jpg' was already converted and renamed to '1.webp' in a previous run.
+    # --- BUG FIX: Skip already standardized files and known sources ---
     known_sources = set(manifest.values())
     pending_files = []
     for f in root_files:
-        if os.path.basename(f) not in known_sources:
+        fname = os.path.basename(f)
+        name_part, ext_part = os.path.splitext(fname)
+        
+        # 1. Skip if it's already a numeric standardized file
+        if name_part.isdigit() and ext_part.lower() == TARGET_EXT:
+            continue
+            
+        # 2. Skip if the filename is already recorded as a source
+        if fname not in known_sources:
             pending_files.append(f)
             
     print(f"Found {len(root_files)} files ({len(pending_files)} new/untracked).")
 
-    workers = cpu_count()
-    
-    tasks = []
-    for f_path in pending_files:
-        filename = os.path.basename(f_path)
-        tasks.append((f_path, filename, paths, DRY_RUN))
-    
-    # Process (Conversion Step)
-    if tasks:
-        with Pool(processes=workers) as pool:
+    if pending_files:
+        tasks = [(f_path, os.path.basename(f_path), paths, DRY_RUN) for f_path in pending_files]
+        with Pool(processes=cpu_count()) as pool:
             for result in tqdm(pool.imap_unordered(convert_and_resize, tasks), total=len(tasks), unit="img", desc="Converting"):
                 if result:
                     final_name, original_name = result
@@ -271,10 +246,7 @@ def process_directory(dir_name):
     else:
         print("No new files to convert.")
 
-    # Standardize (Renaming Step)
     total_images = standardize_names_and_fill_gaps(dir_name, manifest)
-    
-    # Write Data
     update_config_and_manifest(dir_name, total_images, manifest)
 
 def main():

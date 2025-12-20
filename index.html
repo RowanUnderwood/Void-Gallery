@@ -25,6 +25,24 @@
             transform: scale(4); 
             transform-origin: top left;
         }
+
+        /* --- STEREO MODE UI OVERRIDES --- */
+        body.stereo-active .lil-gui.root {
+            position: absolute !important;
+            top: 10px !important;
+            left: 20px !important;
+            right: auto !important;
+            transform-origin: top left;
+            transform: scale(0.8); 
+            max-width: 40vw; 
+        }
+        
+        body.stereo-active #stats-container { display: none !important; }
+        
+        body.stereo-active .instructions {
+            left: 20px;
+            max-width: 45vw;
+        }
     </style>
 </head>
 <body>
@@ -47,13 +65,19 @@
         import * as THREE from 'three';
         import GUI from 'lil-gui';
         import Stats from 'three/addons/libs/stats.module.js';
+        import { StereoEffect } from 'three/addons/effects/StereoEffect.js';
 
         // --- Configuration & Defaults ---
         const config = {
             mode: 'floating', // floating, tunnel, grid
             showStats: false,
             
-            // Shared Active Settings (Now includes Lighting/Performance)
+            // 3D Settings
+            useStereo: false,
+            stereoEyeSep: 0.064, 
+            stereoFOVBoost: 30,
+
+            // Shared Active Settings
             cameraSpeed: 1.0, 
             fogDensity: 0.0035, 
             lightSpeed: 1.0,
@@ -61,6 +85,7 @@
             lightColorMode: 'white',
             lightCount: 15,
             maxUploadsPerFrame: 2,
+            anisotropyLevel: 1, // New Global Default
 
             // Floating/Tunnel Settings
             tunnelRadius: 85.0,
@@ -94,74 +119,72 @@
             uploadImages: () => document.getElementById('image-uploader').click(),
             loadSequence: () => textureManager.loadNumberedSequence(),
             clearImages: () => textureManager.clearUserTextures(),
-            saveSettings: () => saveConfigToFile()
+            saveSettings: () => saveConfigToFile(),
+            toggleFullscreen: () => toggleFullscreen()
         };
 
         // --- Mode Memory Storage ---
-        // UPDATED: Now includes light/performance settings per mode
         let modeStore = {
             floating: {
+                stereoEyeSep: 0.5, stereoFOVBoost: 30,
                 cameraSpeed: 1.0, fogDensity: 0.0035, tunnelRadius: 85.0, imageSize: 60.0,
                 tunnelRows: 5, totalImages: 20, rotationSpeed: 0.1, noRotation: false,
                 tunnelRotation: 0, lightCount: 15, ambientIntensity: 0.5,
                 gridCols: 6, gridRows: 4, gridSpacing: 400, pathRandomness: 0.3, gridEdgeBuffer: 2,
-                lightSpeed: 1.0, lightIntensity: 1500, lightColorMode: 'white', maxUploadsPerFrame: 2
+                lightSpeed: 1.0, lightIntensity: 1500, lightColorMode: 'white', maxUploadsPerFrame: 2,
+                anisotropyLevel: 1
             },
             tunnel: {
+                stereoEyeSep: 0.1, stereoFOVBoost: 50,
                 cameraSpeed: 1.0, fogDensity: 0.0025, tunnelRadius: 85.0, imageSize: 60.0,
                 tunnelRows: 10, totalImages: 10, rotationSpeed: 0.1, noRotation: true,
                 tunnelRotation: 270, lightCount: 2, ambientIntensity: 0.2,
                 gridCols: 6, gridRows: 4, gridSpacing: 400, pathRandomness: 0.3, gridEdgeBuffer: 2,
-                lightSpeed: 5.0, lightIntensity: 800, lightColorMode: 'random', maxUploadsPerFrame: 1
+                lightSpeed: 5.0, lightIntensity: 800, lightColorMode: 'random', maxUploadsPerFrame: 1,
+                anisotropyLevel: 4 // Higher default for tunnel
             },
             grid: {
+                stereoEyeSep: 0.8, stereoFOVBoost: 30,
                 cameraSpeed: 1.5, fogDensity: 0.0015, tunnelRadius: 85.0, imageSize: 50.0,
                 tunnelRows: 5, totalImages: 20, rotationSpeed: 0.0, noRotation: true,
                 tunnelRotation: 0, lightCount: 5, ambientIntensity: 0.5,
                 gridCols: 8, gridRows: 6, gridSpacing: 300, pathRandomness: 0.5, gridEdgeBuffer: 2,
-                lightSpeed: 2.0, lightIntensity: 1500, lightColorMode: 'white', maxUploadsPerFrame: 4
+                lightSpeed: 2.0, lightIntensity: 1500, lightColorMode: 'white', maxUploadsPerFrame: 4,
+                anisotropyLevel: 4 // Higher default for grid
             }
         };
 
-        // UPDATED: Added new keys to state tracking
+        // Added anisotropyLevel to stateKeys so it saves per mode
         const stateKeys = [
             'cameraSpeed', 'fogDensity', 'tunnelRadius', 'imageSize', 
             'tunnelRows', 'totalImages', 'rotationSpeed', 'noRotation', 
             'tunnelRotation', 'lightCount', 'ambientIntensity',
             'gridCols', 'gridRows', 'gridSpacing', 'pathRandomness', 'gridEdgeBuffer',
-            'lightSpeed', 'lightIntensity', 'lightColorMode', 'maxUploadsPerFrame'
+            'lightSpeed', 'lightIntensity', 'lightColorMode', 'maxUploadsPerFrame',
+            'stereoEyeSep', 'stereoFOVBoost', 'anisotropyLevel'
         ];
 
         // --- Globals ---
-        let scene, camera, renderer, stats, imageCards = [], lights = [], clock = new THREE.Clock();
+        let scene, camera, renderer, stereoEffect, stats, imageCards = [], lights = [], clock = new THREE.Clock();
         let ambientLight;
         const imageLoader = new THREE.ImageLoader();
-
-        // Optimized Shared Geometry
         const sharedPlaneGeometry = new THREE.PlaneGeometry(1, 1);
-
-        // Interaction
         const mouse = new THREE.Vector2();
         
         let isRunning = false;
         let guiControllers = {};
         let textureUploadQueue = [];
-        
         let currentModeName = config.mode; 
-        
-        // Priority Spawn System
         let spawnQueue = []; 
-        
         let tunnelGeometry = null;
         let tunnelGrid = { rows: 0, cols: 0, rowHeight: 0, totalDepth: 0 };
-
-        // Grid Mode Globals
         let gridLayers = []; 
         let currentGridTarget = new THREE.Vector3(0, 0, 0);
         let nextGridTargetIndex = { c: 0, r: 0 };
-
         const loadingOverlay = document.getElementById('loading-overlay');
         const loadingSubtext = document.getElementById('loading-subtext');
+
+        const BASE_FOV = 75;
 
         function showLoading(msg, sub = "") {
             loadingOverlay.childNodes[0].nodeValue = msg;
@@ -170,15 +193,26 @@
         }
         function hideLoading() { loadingOverlay.style.opacity = 0; }
         
-        // --- Save / Load System ---
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(err => {
+                    console.log(`Error attempting to enable fullscreen: ${err.message} (${err.name})`);
+                });
+                if (screen.orientation && screen.orientation.lock) {
+                    screen.orientation.lock("landscape").catch(() => {});
+                }
+            } else {
+                if (document.exitFullscreen) document.exitFullscreen();
+            }
+        }
+
         function saveConfigToFile() {
-            // Save active settings to current mode store before export
             stateKeys.forEach(key => {
                 modeStore[config.mode][key] = config[key];
             });
 
             const exportData = {
-                version: 1.6,
+                version: 2.2,
                 savedAt: Date.now(),
                 activeMode: config.mode,
                 globals: {
@@ -186,8 +220,8 @@
                     quality: config.quality,
                     serverStart: config.serverStart,
                     serverEnd: config.serverEnd,
-                    showStats: config.showStats
-                    // REMOVED: light/upload settings are no longer global
+                    showStats: config.showStats,
+                    useStereo: config.useStereo
                 },
                 modes: modeStore
             };
@@ -203,7 +237,6 @@
 
         async function loadConfigFromServer() {
             try {
-                // ADDED: Cache buster to force fresh file load
                 const response = await fetch(`./tunnel_config.json?t=${Date.now()}`);
                 if (response.ok) {
                     const data = await response.json();
@@ -220,7 +253,6 @@
             if (data.modes) {
                 for (const modeName in data.modes) {
                     if (modeStore[modeName]) {
-                        // Merge loaded data into modeStore
                         Object.assign(modeStore[modeName], data.modes[modeName]);
                     }
                 }
@@ -231,16 +263,47 @@
                 currentModeName = data.activeMode; 
             }
             
-            // Apply settings from the newly active mode
             const currentSettings = modeStore[config.mode];
             if (currentSettings) {
                 stateKeys.forEach(key => {
                     if (currentSettings[key] !== undefined) config[key] = currentSettings[key];
                 });
             }
+            
+            updateStereoSettings();
+            // Apply loaded anisotropy immediately
+            updateAnisotropy();
         }
 
-        // --- Texture Manager ---
+        function updateAnisotropy() {
+            // Update active scene meshes
+            imageCards.forEach(card => {
+                if (card.mesh.material && card.mesh.material.map) {
+                    card.mesh.material.map.anisotropy = config.anisotropyLevel;
+                    card.mesh.material.map.needsUpdate = true;
+                }
+            });
+
+            gridLayers.forEach(layer => {
+                layer.children.forEach(mesh => {
+                    if (mesh.material && mesh.material.map) {
+                        mesh.material.map.anisotropy = config.anisotropyLevel;
+                        mesh.material.map.needsUpdate = true;
+                    }
+                });
+            });
+
+            // Update cached textures so future spawns use new setting
+            if (textureManager && textureManager.textureBuffer) {
+                textureManager.textureBuffer.forEach(item => {
+                    if (item.texture) {
+                        item.texture.anisotropy = config.anisotropyLevel;
+                        item.texture.needsUpdate = true;
+                    }
+                });
+            }
+        }
+
         class TextureManager {
             constructor() {
                 this.masterList = []; 
@@ -250,7 +313,6 @@
                 this.preloadTarget = 0;   
                 this.onReadyCallback = null;
             }
-
             shuffle(array) {
                 for (let i = array.length - 1; i > 0; i--) {
                     const j = Math.floor(Math.random() * (i + 1));
@@ -258,45 +320,34 @@
                 }
                 return array;
             }
-
-            // UPDATED: Now allows duplicates only if we don't have enough images to fill the buffer
             refillDeck() {
                 if (this.masterList.length === 0) return;
-
-                // Determine target deck size. We want enough cards to at least fill the buffer.
-                // maxBufferSize is usually around 75+. 
                 const targetDeckSize = Math.max(this.masterList.length, this.maxBufferSize);
-
                 this.playDeck = [];
-
                 if (this.masterList.length >= targetDeckSize) {
-                    // We have plenty of images, just copy the master list (No Duplicates)
                     this.playDeck = [...this.masterList];
                 } else {
-                    // We don't have enough unique images.
-                    // Repeat the master list until we have enough cards to fill the deck.
                     while (this.playDeck.length < targetDeckSize) {
                         this.playDeck.push(...this.masterList);
                     }
                 }
-
                 this.shuffle(this.playDeck);
             }
-
             addUserTexture(file) { 
                 const url = URL.createObjectURL(file);
                 this.masterList.push(url); 
                 this.loadTextureFromUrl(url); 
             }
-
             loadTextureFromUrl(url) {
                 imageLoader.load(url, (image) => {
                     const tex = new THREE.Texture(image);
                     tex.colorSpace = THREE.SRGBColorSpace;
+                    
+                    // APPLY ANISOTROPY HERE FOR NEW TEXTURES
+                    tex.anisotropy = config.anisotropyLevel;
+
                     const ratio = image.width / image.height;
-                    
                     this.textureBuffer.push({ texture: tex, ratio: ratio, pendingUpload: true });
-                    
                     if (this.onReadyCallback) {
                         showLoading("Loading...", `${this.textureBuffer.length} / ${this.preloadTarget}`);
                         if (this.textureBuffer.length >= this.preloadTarget || 
@@ -312,7 +363,6 @@
                     setTimeout(() => this.refillBuffer(), 100);
                 });
             }
-
             async loadNumberedSequence() {
                 this.clearUserTextures();
                 try {
@@ -333,22 +383,18 @@
                 else if (config.quality === 'quarter') folderPath += '/quarterres';
                 folderPath += '/';
                 const ext = '.webp'; 
-                
                 for (let i = config.serverStart; i <= config.serverEnd; i++) {
                     this.masterList.push(`${folderPath}${i}${ext}`);
                 }
-                
                 this.refillDeck();
                 this.preloadAndStart();
             }
-
             resetAndReload() {
                 this.textureBuffer.forEach(t => t.texture.dispose());
                 this.textureBuffer = [];
                 this.refillDeck(); 
                 this.preloadAndStart();
             }
-
             preloadAndStart() {
                 let needed = config.totalImages;
                 if (config.mode === 'tunnel') needed = config.tunnelRows * 10;
@@ -369,14 +415,12 @@
                 }
                 for(let i=0; i<8; i++) this.refillBuffer();
             }
-
             clearUserTextures() {
                 this.masterList = [];
                 this.playDeck = [];
                 this.textureBuffer.forEach(t => t.texture.dispose());
                 this.textureBuffer = [];
             }
-
             refillBuffer() {
                 if (this.textureBuffer.length >= this.maxBufferSize) return;
                 if (this.playDeck.length === 0) {
@@ -386,7 +430,6 @@
                 const nextUrl = this.playDeck.shift();
                 if(nextUrl) this.loadTextureFromUrl(nextUrl);
             }
-
             getTextureFromBuffer() {
                 setTimeout(() => this.refillBuffer(), 0);
                 if (this.textureBuffer.length > 0) {
@@ -408,12 +451,16 @@
 
             scene = new THREE.Scene();
             scene.fog = new THREE.FogExp2(0x000000, config.fogDensity);
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 3000);
+            
+            camera = new THREE.PerspectiveCamera(BASE_FOV, window.innerWidth / window.innerHeight, 0.1, 3000);
             
             renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); 
             document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            stereoEffect = new StereoEffect(renderer);
+            stereoEffect.setSize(window.innerWidth, window.innerHeight);
             
             stats = new Stats();
             document.getElementById('stats-container').appendChild(stats.dom);
@@ -426,6 +473,8 @@
             setupGUI();
             setupEvents();
             
+            updateStereoSettings();
+            
             textureManager.loadNumberedSequence();
         }
 
@@ -433,6 +482,40 @@
             rebuildScene();
             hideLoading();
             if (!isRunning) { isRunning = true; animate(); }
+        }
+
+        function updateStereoSettings() {
+            if (stereoEffect) {
+                if (typeof stereoEffect.setEyeSeparation === 'function') {
+                    stereoEffect.setEyeSeparation(config.stereoEyeSep);
+                } else {
+                    stereoEffect.eyeSeparation = config.stereoEyeSep;
+                }
+            }
+            
+            if (config.useStereo) document.body.classList.add('stereo-active');
+            else document.body.classList.remove('stereo-active');
+
+            if (camera) {
+                if (config.useStereo) {
+                    camera.fov = BASE_FOV + config.stereoFOVBoost;
+                } else {
+                    camera.fov = BASE_FOV;
+                }
+                camera.updateProjectionMatrix();
+            }
+            
+            onWindowResize();
+        }
+
+        function onWindowResize() {
+            if (!camera || !renderer) return;
+            
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            if (stereoEffect) stereoEffect.setSize(window.innerWidth, window.innerHeight);
         }
 
         function rebuildScene() {
@@ -480,7 +563,6 @@
             mat.dispose();
         }
 
-        // --- Priority Spawn Logic ---
         function processSpawnQueue() {
             if (spawnQueue.length === 0) return;
             
@@ -491,7 +573,6 @@
             });
 
             let textureData = textureManager.getTextureFromBuffer();
-            
             while (textureData && spawnQueue.length > 0) {
                 const task = spawnQueue.shift(); 
                 
@@ -501,7 +582,6 @@
                 });
 
                 let mesh;
-
                 if (task.type === 'tunnel') {
                     const geo = tunnelGeometry.clone(); 
                     mesh = new THREE.Mesh(geo, material);
@@ -529,7 +609,6 @@
             }
         }
 
-        // --- Grid Logic ---
         function setupGridSystem() {
             if (!config.gridCols) config.gridCols = 6;
             if (!config.gridRows) config.gridRows = 4;
@@ -537,12 +616,10 @@
             if (!config.imageSize) config.imageSize = 60;
 
             const layersToSpawn = 5;
-            
             nextGridTargetIndex = {
                 c: Math.floor(config.gridCols / 2),
                 r: Math.floor(config.gridRows / 2)
             };
-            
             currentGridTarget.set(0,0,0);
             calculateTargetPosition(nextGridTargetIndex);
 
@@ -552,10 +629,7 @@
             } else {
                 camera.position.set(0,0,0);
             }
-
-            for(let i=0; i<layersToSpawn; i++) {
-                spawnGridLayer(i * -config.gridSpacing - 400); 
-            }
+            for(let i=0; i<layersToSpawn; i++) spawnGridLayer(i * -config.gridSpacing - 400); 
         }
 
         function spawnGridLayer(zPos) {
@@ -569,15 +643,12 @@
         function recycleGridLayer(group) {
             let minZ = 0;
             gridLayers.forEach(g => { if(g.position.z < minZ) minZ = g.position.z; });
-            
             group.position.z = minZ - config.gridSpacing;
-
             for (let i = group.children.length - 1; i >= 0; i--) {
                 const mesh = group.children[i];
                 if (mesh.material) safeDisposeMaterial(mesh.material);
                 group.remove(mesh);
             }
-
             spawnQueue = spawnQueue.filter(task => task.parent !== group);
             createGridTasks(group);
             pickNextTarget();
@@ -587,12 +658,10 @@
             const cols = config.gridCols || 6;
             const rows = config.gridRows || 4;
             const size = config.imageSize || 60;
-
             const totalWidth = cols * size;
             const totalHeight = rows * size;
             const offX = (totalWidth / 2) - (size / 2);
             const offY = (totalHeight / 2) - (size / 2);
-
             const centerC = Math.floor(cols / 2);
             const centerR = Math.floor(rows / 2);
 
@@ -601,13 +670,11 @@
                     const x = (c * size) - offX;
                     const y = (r * size) - offY;
                     const dist = Math.sqrt(Math.pow(c - centerC, 2) + Math.pow(r - centerR, 2));
-                    
                     spawnQueue.push({
                         type: 'grid',
                         parent: group,
                         x: x, y: y, z: 0,
-                        w: size, h: size,
-                        dist: dist 
+                        w: size, h: size, dist: dist 
                     });
                 }
             }
@@ -644,16 +711,13 @@
             currentGridTarget.set(x, y, 0);
         }
 
-        // --- Floating Mode ---
         function spawnFloatingImage(randomZ = false) {
             const angle = Math.random() * Math.PI * 2;
             const r = (Math.random() * 0.5 + 0.5) * config.tunnelRadius;
             const z = randomZ ? -Math.random() * 1000 : -1000;
-            
             const rot = new THREE.Euler();
             if (!config.noRotation) rot.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
             else rot.set(0,0,0);
-
             spawnQueue.push({
                 type: 'floating',
                 x: Math.cos(angle) * r, 
@@ -672,14 +736,12 @@
             });
         }
 
-        // --- Tunnel Mode ---
         function setupTunnelGrid() {
             const circumference = 2 * Math.PI * config.tunnelRadius;
             const approxWidth = config.imageSize * 1.2;
             const cols = Math.floor(circumference / approxWidth);
             const segmentAngle = (Math.PI * 2) / cols;
             const rowHeight = config.imageSize * 1.2;
-            
             const rows = config.tunnelRows;
             
             tunnelGrid = {
@@ -708,7 +770,6 @@
                 }
             }
             tunnelGeometry.userData.baseUVs = Float32Array.from(uvs.array);
-
             for (let r = 0; r < rows; r++) {
                 for (let c = 0; c < cols; c++) {
                     spawnTunnelTask(r, c);
@@ -719,7 +780,6 @@
         function spawnTunnelTask(row, col) {
             const zPos = - (row * tunnelGrid.rowHeight);
             const rotationZ = (col * tunnelGrid.segmentAngle) + Math.PI / 2;
-
             spawnQueue.push({
                 type: 'tunnel',
                 x: 0, y: 0, z: zPos,
@@ -735,28 +795,21 @@
             const baseUVs = mesh.geometry.userData.baseUVs || tunnelGeometry.userData.baseUVs;
             const uvs = mesh.geometry.attributes.uv;
             uvs.array.set(baseUVs);
-
             let baseRot = config.tunnelRotation;
             const angle = (colIndex * tunnelGrid.segmentAngle) % (Math.PI * 2);
             let flip = false;
             if (angle > Math.PI / 2 && angle < 3 * Math.PI / 2) flip = true;
             if (flip) baseRot += 180;
-
             let effectiveRatio = ratio;
             const totalRot = (baseRot % 360);
-            
             const isPortrait = Math.abs((totalRot % 180) - 90) < 1; 
             if (isPortrait) effectiveRatio = 1 / ratio;
-
             const cellRatio = tunnelGrid.cellWidth / config.imageSize;
             let scaleX = 1, scaleY = 1;
-
             if (effectiveRatio > cellRatio) scaleY = (tunnelGrid.cellWidth / effectiveRatio) / config.imageSize;
             else scaleX = (config.imageSize * effectiveRatio) / tunnelGrid.cellWidth;
-
             const rX = scaleX; 
             const rY = scaleY;
-
             for (let i = 0; i < uvs.count; i++) {
                 let u = uvs.getX(i);
                 let v = uvs.getY(i);
@@ -772,7 +825,6 @@
             uvs.needsUpdate = true;
         }
 
-        // --- Animation ---
         function animate() {
             requestAnimationFrame(animate);
             stats.update();
@@ -789,16 +841,13 @@
                 uploadCount++;
             }
             
-            // Mouse Parallax Logic
             const parallaxStrength = 0.05;
             
             if (config.mode === 'floating') {
                 let targetX = Math.sin(time * config.wobbleSpeed) * config.wobbleStrength * 5;
                 let targetY = Math.cos(time * config.wobbleSpeed * 0.7) * config.wobbleStrength * 3;
-                
                 targetX += (mouse.x * 20 - targetX) * parallaxStrength;
                 targetY += (mouse.y * 20 - targetY) * parallaxStrength;
-
                 camera.position.x += (targetX - camera.position.x) * 0.1;
                 camera.position.y += (targetY - camera.position.y) * 0.1;
                 camera.rotation.z = Math.sin(time * config.wobbleSpeed * 0.3) * 0.1 * config.wobbleStrength;
@@ -822,30 +871,26 @@
             } else if (config.mode === 'tunnel') {
                 let targetX = Math.sin(time * config.wobbleSpeed) * config.wobbleStrength * 5;
                 let targetY = Math.cos(time * config.wobbleSpeed * 0.7) * config.wobbleStrength * 3;
-                
                 targetX += (mouse.x * 10 - targetX) * parallaxStrength;
                 targetY += (mouse.y * 10 - targetY) * parallaxStrength;
-
                 camera.position.x += (targetX - camera.position.x) * 0.1;
                 camera.position.y += (targetY - camera.position.y) * 0.1;
-                
                 camera.rotation.z = Math.sin(time * config.wobbleSpeed * 0.3) * 0.1 * config.wobbleStrength;
-
                 const moveDist = config.cameraSpeed * dt * 30; 
                 
                 for (let i = imageCards.length - 1; i >= 0; i--) {
                     const card = imageCards[i];
                     card.mesh.position.z += moveDist;
-                    
                     if (card.mesh.position.z > 50) {
                         const currentZ = card.mesh.position.z;
                         const newZ = currentZ - tunnelGrid.totalDepth - moveDist; 
                         const col = card.colIndex;
-                        
                         scene.remove(card.mesh);
+                        if (card.mesh.geometry) {
+                            card.mesh.geometry.dispose();
+                        }
                         if (card.mesh.material) safeDisposeMaterial(card.mesh.material);
                         imageCards.splice(i, 1);
-
                         spawnQueue.push({
                             type: 'tunnel',
                             x: 0, y: 0, z: newZ,
@@ -857,14 +902,12 @@
                 }
             } else if (config.mode === 'grid') {
                 const moveDist = config.cameraSpeed * dt * 100;
-                
                 if (!isNaN(currentGridTarget.x) && !isNaN(currentGridTarget.y)) {
                     const lookX = currentGridTarget.x + (mouse.x * 50);
                     const lookY = currentGridTarget.y + (mouse.y * 50);
                     camera.position.x += (lookX - camera.position.x) * dt * (config.cameraSpeed * 0.5);
                     camera.position.y += (lookY - camera.position.y) * dt * (config.cameraSpeed * 0.5);
                 }
-
                 gridLayers.forEach(group => {
                     group.position.z += moveDist;
                     if (group.position.z > 150) { 
@@ -883,7 +926,12 @@
                 }
             });
             scene.fog.density = config.fogDensity;
-            renderer.render(scene, camera);
+            
+            if (config.useStereo && stereoEffect) {
+                stereoEffect.render(scene, camera);
+            } else {
+                renderer.render(scene, camera);
+            }
         }
 
         function setupLights() {
@@ -905,33 +953,29 @@
         }
 
         function handleModeChange(newMode) {
-            // 1. SAVE to OLD mode
             const previousSettings = modeStore[currentModeName];
             stateKeys.forEach(key => {
                 if (config[key] !== undefined) {
                     previousSettings[key] = config[key];
                 }
             });
-
-            // 2. SWITCH
             currentModeName = newMode;
-
-            // 3. LOAD from NEW mode
             const targetSettings = modeStore[newMode];
             stateKeys.forEach(key => {
                 if (targetSettings[key] !== undefined) {
                     config[key] = targetSettings[key];
                 }
             });
-
-            // 4. UPDATE
-            if (ambientLight) ambientLight.intensity = config.ambientIntensity; 
-            setupLights(); // Re-run lights setup since count/color/intensity might change
             
+            updateStereoSettings();
+            // IMPORTANT: Update anisotropy immediately upon mode switch so cached textures are ready
+            updateAnisotropy();
+
+            if (ambientLight) ambientLight.intensity = config.ambientIntensity; 
+            setupLights(); 
             for (const key in guiControllers) {
                 if(guiControllers[key]) guiControllers[key].updateDisplay();
             }
-            
             rebuildScene();
         }
 
@@ -944,7 +988,21 @@
 
             const folderGen = gui.addFolder('General');
             folderGen.add(config, 'showStats').name('Show Performance').onChange(v => stats.dom.style.display = v ? 'block' : 'none');
-            // MOVED: maxUploadsPerFrame is now in "Performance / Light" folder (per mode)
+            
+            folderGen.add(config, 'useStereo').name('3D SBS Mode').onChange(() => updateStereoSettings());
+            
+            guiControllers.stereoEyeSep = folderGen.add(config, 'stereoEyeSep', 0, 2).name('3D Separation').onChange(v => {
+                if(stereoEffect) {
+                    if (typeof stereoEffect.setEyeSeparation === 'function') {
+                        stereoEffect.setEyeSeparation(v);
+                    } else {
+                        stereoEffect.eyeSeparation = v;
+                    }
+                }
+            });
+            guiControllers.stereoFOVBoost = folderGen.add(config, 'stereoFOVBoost', 0, 80).name('SBS FOV Widen').onChange(() => updateStereoSettings());
+            
+            folderGen.add(config, 'toggleFullscreen').name('⛶ Toggle Fullscreen'); 
             folderGen.add(config, 'saveSettings').name('💾 Save Config');
 
             guiControllers.cameraSpeed = folderGen.add(config, 'cameraSpeed', 0.1, 4.0).name('Speed');
@@ -966,6 +1024,14 @@
 
             const folderImg = gui.addFolder('Images');
             folderImg.add(config, 'quality', ['full', 'half', 'quarter']).name('Resolution').onChange(() => textureManager.loadNumberedSequence());
+            
+            // --- NEW ANISOTROPY CONTROL ---
+            const maxAniso = renderer.capabilities.getMaxAnisotropy();
+            guiControllers.anisotropyLevel = folderImg.add(config, 'anisotropyLevel', 1, maxAniso, 1)
+                .name('Anisotropy (Sharpness)')
+                .onChange(() => updateAnisotropy());
+            // ------------------------------
+
             guiControllers.tunnelRotation = folderImg.add(config, 'tunnelRotation', [0, 90, 180, 270]).name('Image Rotation').onChange(() => rebuildScene());
             guiControllers.spinSpeed = folderImg.add(config, 'rotationSpeed', 0, 5).name('Spin Speed');
             guiControllers.noRotation = folderImg.add(config, 'noRotation').name('Stop Rotation');
@@ -991,7 +1057,6 @@
             folderContent.add(config, 'uploadImages').name('📂 Upload Local Files');
             folderContent.add(config, 'clearImages').name('❌ Clear All Custom');
             
-            // UPDATED: Lighting/Performance settings (now per mode)
             const folderLight = gui.addFolder('Lighting & Performance');
             guiControllers.lightSpeed = folderLight.add(config, 'lightSpeed', 0, 30);
             guiControllers.ambientIntensity = folderLight.add(config, 'ambientIntensity', 0, 3).name('Ambient Brightness').onChange(v => {
@@ -1041,13 +1106,7 @@
         }
 
         function setupEvents() {
-            window.addEventListener('resize', () => {
-                camera.aspect = window.innerWidth / window.innerHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(window.innerWidth, window.innerHeight);
-            });
-            
-            // Mouse Listener for Parallax
+            window.addEventListener('resize', onWindowResize);
             window.addEventListener('mousemove', (e) => {
                 mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
                 mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
