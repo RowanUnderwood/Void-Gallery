@@ -879,9 +879,12 @@
                 if (!textureData) break;
                 const task = spawnQueue.shift();
                 
-                const material = new THREE.MeshLambertMaterial({ 
+                // forceSinglePass: three.js otherwise draws transparent DoubleSide materials twice
+                // (back then front) and sets material.needsUpdate before each pass, forcing a shader
+                // program lookup per image per frame. Pointless for flat cards; it was the main CPU cost.
+                const material = new THREE.MeshLambertMaterial({
                     map: textureData.texture, side: THREE.DoubleSide, transparent: true,
-                    opacity: config.opacity, depthWrite: false, depthTest: true
+                    opacity: config.opacity, depthWrite: false, depthTest: true, forceSinglePass: true
                 });
 
                 let mesh;
