@@ -19,6 +19,9 @@ std::string ThermalMonitor::throttled() const {
 }
 
 void ThermalMonitor::run() {
+#if defined(_WIN32)
+    return;  // Pi-specific (sysfs + vcgencmd); the stats overlay shows "n/a" on Windows
+#else
     using namespace std::chrono_literals;
     while (!stop_) {
         std::ifstream t("/sys/class/thermal/thermal_zone0/temp");
@@ -44,6 +47,7 @@ void ThermalMonitor::run() {
         }
         for (int i = 0; i < 20 && !stop_; ++i) std::this_thread::sleep_for(100ms);
     }
+#endif
 }
 
 }  // namespace it

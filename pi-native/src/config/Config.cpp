@@ -55,6 +55,9 @@ void readPi(const json& j, PiSettings& p) {
     readField(j, "autoQuality", p.autoQuality);
     readField(j, "textureMemoryMB", p.textureMemoryMB);
     readField(j, "localFolder", p.localFolder);
+    readField(j, "roughnessMaps", p.roughnessMaps);
+    readField(j, "qualityPreset", p.qualityPreset);
+    readField(j, "source", p.source);
     readField(j, "useLocalFolder", p.useLocalFolder);
 }
 
@@ -74,6 +77,9 @@ void writePi(json& j, const PiSettings& p) {
     j["autoQuality"] = p.autoQuality;
     j["textureMemoryMB"] = p.textureMemoryMB;
     j["localFolder"] = p.localFolder;
+    j["roughnessMaps"] = p.roughnessMaps;
+    j["qualityPreset"] = p.qualityPreset;
+    j["source"] = p.source;
     j["useLocalFolder"] = p.useLocalFolder;
 }
 
@@ -94,10 +100,13 @@ const std::vector<std::string>& Config::modeNames() {
 ModeSettings Config::defaultsFor(const std::string& mode) {
     ModeSettings m;
     if (mode == "floating") {
+        m.stereoEyeSep = 0.5;
         m.noRotation = false;
         m.lightCount = 15;
         m.anisotropyLevel = 1;
     } else if (mode == "tunnel") {
+        m.stereoEyeSep = 0.1;
+        m.stereoFOVBoost = 50;
         m.fogDensity = 0.0025;
         m.tunnelRows = 10;
         m.totalImages = 10;
@@ -110,6 +119,7 @@ ModeSettings Config::defaultsFor(const std::string& mode) {
         m.maxUploadsPerFrame = 1;
         m.anisotropyLevel = 4;
     } else if (mode == "grid") {
+        m.stereoEyeSep = 0.8;
         m.cameraSpeed = 1.5;
         m.fogDensity = 0.0015;
         m.imageSize = 50;
@@ -123,6 +133,7 @@ ModeSettings Config::defaultsFor(const std::string& mode) {
         m.maxUploadsPerFrame = 4;
         m.anisotropyLevel = 4;
     } else if (mode == "maze") {
+        m.stereoEyeSep = 0.5;
         m.fogDensity = 0.012;
         m.imageSize = 40;
         m.rotationSpeed = 0.0;
@@ -138,6 +149,58 @@ ModeSettings Config::defaultsFor(const std::string& mode) {
 
 Config::Config() {
     for (const auto& name : modeNames()) modes[name] = defaultsFor(name);
+    if (caps::kDesktop) {
+        auto& pi = globals.pi;
+        pi.frameCap = 60;
+        pi.maxLights = caps::kMaxLightsPerDraw;
+        pi.uploadBytesPerFrame = 32 * 1024 * 1024;
+        pi.textureMemoryMB = 4096;
+        pi.qualityPreset = "ultra";  // tuned on an RTX 5090 @ 3840x2160; pick a lower preset for weaker GPUs
+        applyQualityPreset(*this, pi.qualityPreset);
+    }
+}
+
+bool applyQualityPreset(Config& c, const std::string& name) {
+    struct Preset {
+        const char* name;
+        double renderScale;
+        int msaa;
+        const char* shadows;
+        int shadowRes;
+        int lightsPerDraw;
+        bool roughness;
+        int textureEdge;
+        int anisotropy;
+        const char* images;  // server folder resolution: quarter | half | full
+    };
+    // ultra = every quality setting at its maximum. Measured on the dev machine (RTX 5090, 3840x2160,
+    // vsync off): worst GPU p99 1.4 ms per frame, and 4 ms with every content limit maxed + 3D SBS,
+    // i.e. far above 60 fps. Lower presets are for weaker GPUs / integrated graphics.
+    static const Preset presets[] = {
+        {"low", 0.75, 0, "off", 1024, 4, false, 1024, 4, "quarter"},
+        {"medium", 1.0, 2, "nearest", 1024, 6, false, 1024, 8, "half"},
+        {"high", 1.0, 4, "all", 2048, 8, true, 2048, 16, "half"},
+        {"ultra", 2.0, 8, "all", 4096, 8, true, 4096, 16, "full"},
+    };
+    for (const auto& p : presets) {
+        if (name != p.name) continue;
+        auto& pi = c.globals.pi;
+        pi.renderScale = p.renderScale;
+        pi.msaa = p.msaa;
+        pi.mazeShadows = p.shadows;
+        pi.maxLights = p.lightsPerDraw;
+        pi.normalMaps = true;
+        pi.roughnessMaps = p.roughness;
+        pi.maxTextureEdge = p.textureEdge;
+        c.globals.quality = p.images;
+        for (auto& [mode, m] : c.modes) {
+            m.anisotropyLevel = p.anisotropy;
+            m.mazeShadowRes = p.shadowRes;
+        }
+        pi.qualityPreset = name;
+        return true;
+    }
+    return false;
 }
 
 void Config::apply(const json& doc) {
@@ -148,6 +211,7 @@ void Config::apply(const json& doc) {
         readField(*g, "serverStart", globals.serverStart);
         readField(*g, "serverEnd", globals.serverEnd);
         readField(*g, "showStats", globals.showStats);
+        readField(*g, "useStereo", globals.useStereo);
         readField(*g, "availableTextures", globals.availableTextures);
         readField(*g, "imageFolders", globals.imageFolders);
         if (auto p = g->find("pi"); p != g->end() && p->is_object()) readPi(*p, globals.pi);
@@ -180,6 +244,7 @@ json Config::toJson() const {
     g["serverStart"] = globals.serverStart;
     g["serverEnd"] = globals.serverEnd;
     g["showStats"] = globals.showStats;
+    g["useStereo"] = globals.useStereo;
     g["availableTextures"] = globals.availableTextures;
     g["imageFolders"] = globals.imageFolders;
     json& p = g["pi"];
@@ -196,7 +261,7 @@ json Config::toJson() const {
     return j;
 }
 
-void Config::clampForPi() {
+void Config::clampToPlatform() {
     for (auto& [name, m] : modes) {
         m.tunnelRows = std::clamp(m.tunnelRows, 1, caps::kMaxTunnelRows);
         m.gridCols = std::clamp(m.gridCols, 2, caps::kMaxGridDim);
@@ -206,7 +271,11 @@ void Config::clampForPi() {
         m.mazeImageCount = std::clamp(m.mazeImageCount, 0, caps::kMaxMazeImages);
         m.lightCount = std::clamp(m.lightCount, 0, caps::kMaxLightCount);
         m.anisotropyLevel = std::clamp(m.anisotropyLevel, 1, caps::kMaxAnisotropy);
-        m.mazeShadowRes = m.mazeShadowRes <= 256 ? 256 : caps::kMaxShadowRes;
+        int res = 256;  // power of two in [256, kMaxShadowRes]
+        while (res < m.mazeShadowRes && res < caps::kMaxShadowRes) res *= 2;
+        m.mazeShadowRes = res;
+        m.stereoEyeSep = std::clamp(m.stereoEyeSep, 0.0, 2.0);
+        m.stereoFOVBoost = std::clamp(m.stereoFOVBoost, 0.0, 80.0);
         m.maxUploadsPerFrame = std::clamp(m.maxUploadsPerFrame, 1, 20);
         m.tunnelRotation = ((m.tunnelRotation % 360) + 360) % 360 / 90 * 90;
         m.mazeWalkingSpeed = std::clamp(m.mazeWalkingSpeed, 0.1, 5.0);
@@ -214,17 +283,29 @@ void Config::clampForPi() {
         if (m.lightColorMode != "white" && m.lightColorMode != "random") m.lightColorMode = "white";
     }
     auto& pi = globals.pi;
-    pi.frameCap = pi.frameCap <= 30 ? 30 : 60;
+    if (caps::kDesktop) {
+        pi.frameCap = pi.frameCap <= 0 ? 0 : pi.frameCap <= 30 ? 30 : pi.frameCap <= 60 ? 60 : 120;
+    } else {
+        pi.frameCap = pi.frameCap <= 30 ? 30 : 60;
+    }
     pi.rotation = ((pi.rotation % 360) + 360) % 360 / 90 * 90;
     pi.randomInterval = std::clamp(pi.randomInterval, 10.0, 3600.0);
-    pi.renderScale = std::clamp(pi.renderScale, 0.5, 1.0);
-    pi.msaa = pi.msaa >= 4 ? 4 : 0;
+    pi.renderScale = std::clamp(pi.renderScale, 0.5, caps::kMaxRenderScale);
+    pi.msaa = pi.msaa >= 8 ? 8 : pi.msaa >= 4 ? 4 : pi.msaa >= 2 ? 2 : 0;
+    pi.msaa = std::min(pi.msaa, caps::kMaxMsaa);
     pi.maxTextureEdge = std::clamp(pi.maxTextureEdge, 128, 2048);
     pi.uploadBytesPerFrame = std::clamp(pi.uploadBytesPerFrame, 256 * 1024, 64 * 1024 * 1024);
     pi.maxLights = std::clamp(pi.maxLights, 0, caps::kMaxLightsPerDraw);
     pi.textureMemoryMB = std::clamp(pi.textureMemoryMB, 128, 4096);
-    if (pi.mazeShadows != "off" && pi.mazeShadows != "nearest") pi.mazeShadows = "off";
-    if (pi.regenTransition != "fade" && pi.regenTransition != "cut") pi.regenTransition = "fade";
+    if (pi.mazeShadows != "off" && pi.mazeShadows != "nearest" && pi.mazeShadows != "all") pi.mazeShadows = "off";
+    if (!caps::kDesktop && pi.mazeShadows == "all") pi.mazeShadows = "nearest";
+    if (pi.regenTransition != "fade" && pi.regenTransition != "cut" && pi.regenTransition != "flip")
+        pi.regenTransition = "fade";
+    if (!caps::kDesktop) {
+        if (pi.regenTransition == "flip") pi.regenTransition = "fade";
+        pi.roughnessMaps = false;
+        // useStereo is left as-is (the web viewer's setting); the Pi renderer simply ignores it.
+    }
     if (globals.quality != "full" && globals.quality != "half" && globals.quality != "quarter")
         globals.quality = "quarter";
     globals.serverStart = std::max(1, globals.serverStart);

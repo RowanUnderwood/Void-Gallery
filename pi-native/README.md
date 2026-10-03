@@ -1,13 +1,25 @@
-# Image Tunnel — native Raspberry Pi 5 viewer
+# Image Tunnel — native viewer (Raspberry Pi 5 kiosk + Windows screensaver)
 
-A C++20 / SDL2 / OpenGL ES 3.1 port of [`../index.html`](../index.html), built from
-[`../PI_NATIVE_PLAN.md`](../PI_NATIVE_PLAN.md). It shows the same four modes (floating, tunnel, grid, maze), reads the
-same asset layout produced by `process_assets.py`, and uses the same v2.2 config files. 3D SBS mode is
-removed.
+A C++20 / SDL2 port of [`../index.html`](../index.html), originally built from
+[`../PI_NATIVE_PLAN.md`](../PI_NATIVE_PLAN.md). It shows the same four modes (floating, tunnel, grid, maze) plus a
+"random" mode. It reads the same asset layout produced by `process_assets.py` and uses the same v2.2 config files.
 
-## Build
+One codebase, two platforms:
 
-On Raspberry Pi OS Bookworm (64-bit), or any Linux machine with Mesa:
+| | Raspberry Pi 5 | Windows |
+|---|---|---|
+| Graphics | OpenGL ES 3.1 (Mesa V3D) | OpenGL 4.3+ core via [glad](third_party/glad) |
+| Runs as | KMS/DRM kiosk under systemd | `ImageTunnel.scr` screensaver, plus `imagetunnel.exe` for the console |
+| HTTP | libcurl | WinHTTP |
+| Frame cap | 30 / 60 (vsync) | 30 / 60 / 120 (vsync) or unlocked (VRR) |
+| Limits | cut down for the Pi (see the plan, section 3) | the web version's full ranges, and more |
+| 3D SBS, roughness maps, "flip" maze transition, shadows on every spotlight, drag & drop images | no | yes |
+
+See [Windows screensaver](#windows-screensaver) below for the Windows build.
+
+## Build (Linux / Raspberry Pi)
+
+On Raspberry Pi OS (Bookworm or Trixie, 64-bit), or any Linux machine with Mesa:
 
 ```bash
 sudo apt-get install build-essential cmake ninja-build pkg-config git \
@@ -39,6 +51,78 @@ SDL_VIDEODRIVER=kmsdrm ./build/imagetunnel --source http://192.168.1.10/
 | `R` | Reload the server config and discard local settings (the old file is kept as `config.json.bak`) |
 | `Esc` | Quit. The systemd service restarts the app. |
 | `Ctrl+Q` | Quit and stay stopped (exit code 10) |
+
+## Windows screensaver
+
+### Build (MSYS2 UCRT64)
+
+```bash
+pacman -S mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,SDL2,libwebp,glm,nlohmann-json,pkgconf}
+cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-win
+build-win/imagetunnel_tests.exe
+```
+
+This produces:
+- **`ImageTunnel.scr`:** the screensaver, about 9 MB. It is fully static (SDL2, libwebp and the C++ runtime are
+  linked in) and needs only DLLs that ship with Windows 10/11.
+- **`imagetunnel.exe`:** the same program built for the console, for `--bench` runs and logs.
+
+### Install
+
+Copy `ImageTunnel.scr` to `C:\Windows\System32`, or right-click it and choose **Install**. Then select
+**Image Tunnel** in *Settings → Personalization → Lock screen → Screen saver*.
+
+The control panel uses the standard screensaver arguments:
+
+| Argument | What happens |
+|---|---|
+| `/s` | Fullscreen on the primary monitor. Other monitors go black. Any key, click or real mouse movement exits. |
+| `/c` | Settings window: the live scene plus the full settings panel, with **Save & Close**. Also opens when the `.scr` is run with no arguments. |
+| `/p <hwnd>` | Live preview inside the control panel's monitor picture, at 30 fps with cheap settings. |
+
+Settings are saved to `%APPDATA%\ImageTunnel\config.json`, and **Image Source** (the nginx URL or a web-root
+folder) is set in the same window. Downloads are cached in `%LOCALAPPDATA%\ImageTunnel\cache`. Because the screensaver
+has no console, it writes its log to `%LOCALAPPDATA%\ImageTunnel\imagetunnel.log`.
+
+Launching the `.scr` from a script goes through ShellExecute, which Windows rewrites to `"%1" /S` for `.scr` files, so the
+script's own arguments are dropped. Use `CreateProcess`, or run `imagetunnel.exe`, when testing `/c` and `/p`.
+
+### Quality presets and frame cap
+
+The **Display & Quality** section of the settings has a **Quality Preset**:
+
+| Preset | Render scale | MSAA | Maze shadows | Lights / draw | Roughness | Textures | Anisotropy | Images |
+|---|---|---|---|---|---|---|---|---|
+| low | 0.75 | off | off | 4 | no | 1024 | 4× | quarter-res |
+| medium | 1.0 | 2× | nearest, 1024 | 6 | no | 1024 | 8× | half-res |
+| high | 1.0 | 4× | all, 2048 | 8 | yes | 2048 | 16× | half-res |
+| **ultra** (default) | 2.0 (supersampled) | 8× | all, 4096 | 8 | yes | 4096 | 16× | full-res |
+
+Ultra is the maximum of every quality setting. It was measured on an RTX 5090 at 3840×2160, with vsync off:
+- **Ultra:** the worst mode's GPU p99 is 1.4 ms per frame.
+- **Ultra with every content limit maxed and 3D SBS on:** the worst frame p99 is 4 ms. The content limits are 20 lights, a 50-row tunnel, a 20×20 grid, 500 floating images, and a 41×41 maze with 200 paintings.
+
+Pick a lower preset on weaker GPUs; the stats overlay (`P`) shows GPU time per frame. Changing any individual
+setting switches the preset to "custom".
+
+The **Frame Cap** options are 30, 60 (the default), 120 or Unlocked.
+- **When the cap divides the refresh rate:** it is locked with vsync (swap interval = refresh / cap), for example 60 fps on a 120 Hz display.
+- **When it doesn't** (for example 60 on 144 Hz): vsync plus a precise software limiter, which is what G-Sync/FreeSync displays want.
+- **Unlocked:** vsync is off.
+
+### Features the Pi build cuts, restored on Windows
+
+- **3D SBS:** half-width side by side, with per-mode separation and FOV widening, as in `index.html`'s StereoEffect.
+- **Drag & drop:** drop images or a folder onto the window (`imagetunnel.exe --windowed` or the settings window).
+  **Clear custom** goes back to the server images.
+- **Fullscreen toggle:** F11 or Alt+Enter.
+- **Maze shadows on all 6 spotlights:** one depth-texture-array layer per spotlight, up to 4096².
+- **Roughness maps:** a normalised Blinn-Phong lobe driven by `_Roughness` textures, approximating three's
+  MeshStandardMaterial.
+- **"flip" maze transition:** the web version's CSS `rotateY(90deg)` squeeze.
+- **Full limits:** 50 tunnel rows, a 20×20 grid, 500 floating images, a 41×41 maze, 200 paintings, 20 lights, 16× anisotropy, MSAA 8×,
+  render scale up to 2×.
 
 ### Random mode
 

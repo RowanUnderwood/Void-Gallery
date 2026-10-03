@@ -26,7 +26,7 @@ constexpr double kConfigVersion = 2.2;
     X(bool, showMazeMap) X(int, mazeComplexity) X(double, mazeWalkingSpeed)                       \
     X(double, mazeTextureTiling) X(int, mazeImageCount) X(double, mazeSpotlightAngle)             \
     X(double, mazeSpotlightHeight) X(int, mazeShadowRes) X(std::string, navStyle)                 \
-    X(std::string, mazeWallTexture) X(std::string, mazeFloorTexture) X(std::string, mazeCeilingTexture)
+    X(std::string, mazeWallTexture) X(std::string, mazeFloorTexture) X(std::string, mazeCeilingTexture)     X(double, stereoEyeSep) X(double, stereoFOVBoost)
 
 struct ModeSettings {
     // Defaults match the `config` object in index.html.
@@ -63,21 +63,26 @@ struct ModeSettings {
     std::string mazeWallTexture = "Bricks003_1K-JPG";
     std::string mazeFloorTexture = "WoodFloor071_1K-PNG";
     std::string mazeCeilingTexture = "OfficeCeiling001_1K-PNG";
+    double stereoEyeSep = 0.064;       // 3D SBS (desktop builds only)
+    double stereoFOVBoost = 30.0;
 };
 
-// Pi-only settings, stored under globals.pi (ignored by the web viewer).
+// Native-app settings (Pi and Windows), stored under globals.pi (ignored by the web viewer).
 struct PiSettings {
-    int frameCap = 60;                 // 60 or 30
+    int frameCap = 60;                 // Pi: 30 | 60. Desktop: 30 | 60 | 120 | 0 (= unlocked, for VRR)
     int rotation = 0;                  // monitor rotation, degrees clockwise: 0 | 90 | 180 | 270
     bool randomMode = false;           // "random" display mode: cycle through the four modes
     double randomInterval = 60.0;      // seconds per mode in random mode (counted once it has loaded)
     double renderScale = 1.0;          // 3D scene resolution scale (UI stays native)
-    int msaa = 0;                      // 0 or 4
+    int msaa = 0;                      // Pi: 0 | 4. Desktop: 0 | 2 | 4 | 8
     int maxTextureEdge = 1024;         // decode-time downscale limit
     int uploadBytesPerFrame = 6 * 1024 * 1024;
-    std::string mazeShadows = "off";   // "off" | "nearest"
-    int maxLights = 4;                 // point/spot lights evaluated per draw (<= 4)
+    std::string mazeShadows = "off";   // "off" | "nearest" | "all" (all = desktop only)
+    int maxLights = 4;                 // point/spot lights evaluated per draw (caps::kMaxLightsPerDraw)
     bool normalMaps = true;
+    bool roughnessMaps = false;        // maze: per-texel specular from the _Roughness map
+    std::string qualityPreset = "custom";  // last preset applied from the settings panel
+    std::string source;                // image source (URL or folder); the CLI --source overrides it
     std::string regenTransition = "fade";
     bool autoQuality = false;
     int textureMemoryMB = 600;         // budget used to pick per-mode texture size
@@ -91,14 +96,32 @@ struct Globals {
     int serverStart = 1;
     int serverEnd = 1075;
     bool showStats = false;
+    bool useStereo = false;            // 3D SBS (desktop builds only; the Pi build ignores it)
     std::vector<std::string> availableTextures = {"Bricks003_1K-JPG", "OfficeCeiling001_1K-PNG",
                                                   "Tiles084_1K-PNG", "WoodFloor071_1K-PNG"};
     std::vector<std::string> imageFolders = {"transparentimages", "movieposters", "images", "AIimages"};
     PiSettings pi;
 };
 
-// Pi hardware caps (see PI_NATIVE_PLAN.md section 3).
+// Hardware limits per platform. The Pi values are the cuts from PI_NATIVE_PLAN.md section 3; the
+// desktop values restore index.html's ranges (and a bit more where a desktop GPU allows it).
 namespace caps {
+#if defined(IT_DESKTOP_GL)
+constexpr bool kDesktop = true;
+constexpr int kMaxTunnelRows = 50;
+constexpr int kMaxGridDim = 20;
+constexpr int kMaxFloating = 500;
+constexpr int kMaxMazeComplexity = 41;
+constexpr int kMaxMazeImages = 200;
+constexpr int kMaxLightCount = 20;
+constexpr int kMaxLightsPerDraw = 8;
+constexpr int kMaxAnisotropy = 16;
+constexpr int kMaxShadowRes = 4096;
+constexpr int kMaxMsaa = 8;
+constexpr double kMaxRenderScale = 2.0;
+constexpr int kMaxSpots = 6;
+#else
+constexpr bool kDesktop = false;
 constexpr int kMaxTunnelRows = 20;
 constexpr int kMaxGridDim = 12;
 constexpr int kMaxFloating = 150;
@@ -108,6 +131,13 @@ constexpr int kMaxLightCount = 8;
 constexpr int kMaxLightsPerDraw = 4;
 constexpr int kMaxAnisotropy = 4;
 constexpr int kMaxShadowRes = 512;
+constexpr int kMaxMsaa = 4;
+constexpr double kMaxRenderScale = 1.0;
+constexpr int kMaxSpots = 4;
+#endif
+// Shader array sizes (must be >= the largest platform value above).
+constexpr int kShaderLights = 8;
+constexpr int kShaderSpots = 6;
 }  // namespace caps
 
 struct Config {
@@ -135,10 +165,16 @@ struct Config {
     void apply(const json& doc);
     // Builds a v2.2 document from current values on top of `raw`.
     json toJson() const;
-    // Clamps all values to the Pi limits.
-    void clampForPi();
+    // Clamps all values to this platform's limits (caps::).
+    void clampToPlatform();
 };
 
 std::string qualityFolder(const std::string& quality);  // "" | "halfres/" | "quarterres/"
+
+// Desktop quality presets: "low" | "medium" | "high" | "ultra". Sets render quality only (scale,
+// MSAA, shadows, lights per draw, material maps, texture size, anisotropy, image resolution),
+// never scene content (counts, sizes, speeds).
+// Returns false for unknown names (e.g. "custom", which leaves everything as is).
+bool applyQualityPreset(Config& c, const std::string& name);
 
 }  // namespace it

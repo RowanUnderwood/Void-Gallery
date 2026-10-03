@@ -119,7 +119,7 @@ static void testConfigRoundTrip() {
                 "maze": {"mazeComplexity": 22, "navStyle": "modern"}}
     })");
     c.apply(doc);
-    c.clampForPi();
+    c.clampToPlatform();
     CHECK(c.activeMode == "grid");
     CHECK(c.globals.serverPath == "movieposters");
     CHECK(c.modes["grid"].gridCols == caps::kMaxGridDim);

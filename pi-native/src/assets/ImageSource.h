@@ -30,5 +30,6 @@ std::shared_ptr<ImageSource> makeImageSource(const std::string& spec, const std:
 bool readFile(const std::string& path, std::vector<uint8_t>& out);
 bool writeFileAtomic(const std::string& path, const void* data, size_t size);
 std::vector<std::string> listImageFiles(const std::string& dir);  // sorted absolute paths
+bool isAbsolutePath(const std::string& p);                        // "/x", "\\x" or "C:\x"
 
 }  // namespace it

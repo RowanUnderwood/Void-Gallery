@@ -5,17 +5,20 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "assets/Decoder.h"
 
-#ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
-#define GL_TEXTURE_MAX_ANISOTROPY_EXT 0x84FE
-#endif
-#ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
-#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
-#endif
-
 namespace it::gl {
+
+bool loadFunctions(void* (*getProc)(const char*)) {
+#if defined(IT_DESKTOP_GL)
+    return gladLoadGL(reinterpret_cast<GLADloadfunc>(getProc)) != 0;
+#else
+    (void)getProc;
+    return true;
+#endif
+}
 
 bool hasExtension(const char* name) {
     GLint n = 0;
@@ -31,7 +34,8 @@ float maxAnisotropy() {
     static float cached = -1.0f;
     if (cached < 0.0f) {
         cached = 1.0f;
-        if (hasExtension("GL_EXT_texture_filter_anisotropic")) glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &cached);
+        if (hasExtension("GL_EXT_texture_filter_anisotropic") || hasExtension("GL_ARB_texture_filter_anisotropic"))
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &cached);
     }
     return cached;
 }
@@ -58,9 +62,21 @@ static GLuint compileStage(GLenum type, const char* src, const char* name) {
     return s;
 }
 
-bool Shader::build(const char* name, const char* vs, const char* fs) {
-    GLuint v = compileStage(GL_VERTEX_SHADER, vs, name);
-    GLuint f = compileStage(GL_FRAGMENT_SHADER, fs, name);
+// Sources are GLSL ES 3.00; desktop GL 3.3+ accepts the same code (precision qualifiers are
+// allowed and ignored) once the version line is swapped.
+static std::string forThisGl(const char* src) {
+    std::string s(src);
+#if defined(IT_DESKTOP_GL)
+    const std::string es = "#version 300 es";
+    if (s.compare(0, es.size(), es) == 0) s.replace(0, es.size(), "#version 330 core");
+#endif
+    return s;
+}
+
+bool Shader::build(const char* name, const char* vsSrc, const char* fsSrc) {
+    const std::string vs = forThisGl(vsSrc), fs = forThisGl(fsSrc);
+    GLuint v = compileStage(GL_VERTEX_SHADER, vs.c_str(), name);
+    GLuint f = compileStage(GL_FRAGMENT_SHADER, fs.c_str(), name);
     if (!v || !f) {
         if (v) glDeleteShader(v);
         if (f) glDeleteShader(f);
@@ -256,7 +272,7 @@ void SceneTarget::begin(int lw, int lh, float scale, int msaa, bool rotated) {
         destroyPresent();
     }
 
-    const bool scaled = scale < 0.999f;
+    const bool scaled = std::abs(scale - 1.0f) > 0.001f;  // below 1: upscaled; above 1: supersampled
     direct_ = !scaled && msaa <= 0;
     if (direct_) {
         bindOverlaySurface();

@@ -6,11 +6,12 @@
 
 namespace it {
 
-void FrameStats::push(float frameMs, float cpuMs) {
+void FrameStats::push(float frameMs, float cpuMs, float gpuMs) {
     hist_[head_] = frameMs;
     head_ = (head_ + 1) % kHistory;
     count_ = std::min(count_ + 1, kHistory);
     cpu_ = cpu_ * 0.9f + cpuMs * 0.1f;
+    gpu_ = gpu_ * 0.9f + gpuMs * 0.1f;
 }
 
 float FrameStats::avgMs() const {
@@ -43,9 +44,9 @@ void BenchRecorder::start(const std::string& mode, float seconds, float refreshH
     active_ = true;
 }
 
-bool BenchRecorder::record(float frameMs, float cpuMs, size_t texMB, const std::string& throttle) {
+bool BenchRecorder::record(float frameMs, float cpuMs, float gpuMs, size_t texMB, const std::string& throttle) {
     if (!active_) return false;
-    samples_.push_back({frameMs, cpuMs, texMB, throttle});
+    samples_.push_back({frameMs, cpuMs, gpuMs, texMB, throttle});
     elapsed_ += frameMs / 1000.0f;
     if (elapsed_ >= seconds_) active_ = false;
     return active_;
@@ -67,19 +68,25 @@ bool BenchRecorder::finish(const std::string& csvPath) const {
     }
     std::sort(ft.begin(), ft.end());
     auto pct = [&](float p) { return ft[std::min(ft.size() - 1, static_cast<size_t>(p * (ft.size() - 1)))]; };
+    std::vector<float> gt;
+    for (const auto& s : samples_) gt.push_back(s.gpuMs);
+    std::sort(gt.begin(), gt.end());
+    auto gpct = [&](float p) { return gt[std::min(gt.size() - 1, static_cast<size_t>(p * (gt.size() - 1)))]; };
     const float avg = static_cast<float>(sum / ft.size());
     const float p95 = pct(0.95f), p99 = pct(0.99f);
-    const bool pass = p99 <= 34.5f;  // 30 fps budget + timer/vsync jitter (a 30 fps lock sits at 33.3)
+    // Pass: p99 within 1.25 frame periods of the target rate. A dropped frame (one extra vblank)
+    // is >= 1.5 periods, so this catches stutter while tolerating CPU-side timing jitter.
+    const bool pass = p99 <= 1.25f * vsyncMs;
     std::printf("BENCH mode=%s frames=%zu avg=%.2fms fps=%.1f p95=%.2fms p99=%.2fms max=%.2fms missed_vsyncs=%d "
-                "peak_tex=%zuMB throttle=%s result=%s\n",
-                mode_.c_str(), ft.size(), avg, 1000.0f / avg, p95, p99, ft.back(), missed, peakMB,
-                samples_.back().throttle.c_str(), pass ? "PASS" : "FAIL");
+                "gpu_p50=%.2fms gpu_p99=%.2fms gpu_max=%.2fms peak_tex=%zuMB throttle=%s result=%s\n",
+                mode_.c_str(), ft.size(), avg, 1000.0f / avg, p95, p99, ft.back(), missed, gpct(0.5f), gpct(0.99f),
+                gt.back(), peakMB, samples_.back().throttle.c_str(), pass ? "PASS" : "FAIL");
     if (!csvPath.empty()) {
         std::ofstream f(csvPath);
-        f << "frame,frame_ms,cpu_ms,texture_mb,throttled\n";
+        f << "frame,frame_ms,cpu_ms,gpu_ms,texture_mb,throttled\n";
         for (size_t i = 0; i < samples_.size(); ++i)
-            f << i << ',' << samples_[i].frameMs << ',' << samples_[i].cpuMs << ',' << samples_[i].texMB << ','
-              << samples_[i].throttle << '\n';
+            f << i << ',' << samples_[i].frameMs << ',' << samples_[i].cpuMs << ',' << samples_[i].gpuMs << ','
+              << samples_[i].texMB << ',' << samples_[i].throttle << '\n';
     }
     return pass;
 }

@@ -24,7 +24,7 @@ struct Renderer {
 
     GLuint white = 0;        // 1x1 white texture
     GLuint flatNormal = 0;   // 1x1 (0.5, 0.5, 1) normal
-    GLuint dummyShadow = 0;  // 1x1 depth texture so the shadow sampler is always complete
+    GLuint dummyShadow = 0;  // 1x1x1 depth array so the shadow sampler is always complete
 
     int drawCalls = 0;
     glm::mat4 overlayRotation{1.0f};  // applied to 2D overlays when the scene is rotated in clip space
@@ -39,7 +39,7 @@ struct Renderer {
     void drawRect2D(float x, float y, float w, float h, const glm::vec4& srgba, int screenW, int screenH);
     void drawMesh2D(const gl::Mesh& mesh, const glm::mat4& model, const glm::vec4& srgba, int screenW, int screenH);
     // Copies the composed logical frame onto the (bound) window framebuffer, rotated.
-    void drawRotated(GLuint texture, int rotation);
+    void drawRotated(GLuint texture, int rotation, const glm::vec2& scale = glm::vec2(1.0f));
 };
 
 }  // namespace it

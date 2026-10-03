@@ -1,7 +1,5 @@
 #include "assets/ImageSource.h"
 
-#include <curl/curl.h>
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -11,12 +9,25 @@
 #include <mutex>
 #include <unordered_set>
 
+#include "assets/HttpClient.h"
+
 namespace fs = std::filesystem;
 
 namespace it {
 
+namespace {
+// Paths are UTF-8 std::strings everywhere; on Windows they must reach the OS as wide strings.
+fs::path toPath(const std::string& s) {
+    return fs::path(std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
+}
+std::string fromPath(const fs::path& p) {
+    const std::u8string u = p.u8string();
+    return std::string(reinterpret_cast<const char*>(u.data()), u.size());
+}
+}  // namespace
+
 bool readFile(const std::string& path, std::vector<uint8_t>& out) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    std::ifstream f(toPath(path), std::ios::binary | std::ios::ate);
     if (!f) return false;
     const std::streamsize size = f.tellg();
     if (size < 0) return false;
@@ -27,43 +38,49 @@ bool readFile(const std::string& path, std::vector<uint8_t>& out) {
 
 bool writeFileAtomic(const std::string& path, const void* data, size_t size) {
     std::error_code ec;
-    fs::create_directories(fs::path(path).parent_path(), ec);
-    const std::string tmp = path + ".tmp";
+    const fs::path p = toPath(path);
+    fs::create_directories(p.parent_path(), ec);
+    fs::path tmp = p;
+    tmp += ".tmp";
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) return false;
         f.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
         if (!f) return false;
     }
-    fs::rename(tmp, path, ec);
+    fs::rename(tmp, p, ec);
     return !ec;
 }
 
 std::vector<std::string> listImageFiles(const std::string& dir) {
     std::vector<std::string> files;
     std::error_code ec;
-    for (const auto& e : fs::directory_iterator(dir, ec)) {
+    for (const auto& e : fs::directory_iterator(toPath(dir), ec)) {
         if (!e.is_regular_file()) continue;
-        std::string ext = e.path().extension().string();
+        std::string ext = fromPath(e.path().extension());
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
         if (ext == ".webp" || ext == ".png" || ext == ".jpg" || ext == ".jpeg")
-            files.push_back(fs::absolute(e.path()).string());
+            files.push_back(fromPath(fs::absolute(e.path())));
     }
     std::sort(files.begin(), files.end());
     return files;
 }
 
-namespace {
+bool isAbsolutePath(const std::string& p) {
+    if (p.empty()) return false;
+    if (p[0] == '/' || p[0] == '\\') return true;
+    return p.size() > 2 && p[1] == ':' && (p[2] == '/' || p[2] == '\\');  // C:\... (on any platform)
+}
 
-bool isAbsolute(const std::string& p) { return !p.empty() && p[0] == '/'; }
+namespace {
 
 class FileSource final : public ImageSource {
 public:
     explicit FileSource(std::string root) : root_(std::move(root)) {
-        if (!root_.empty() && root_.back() != '/') root_ += '/';
+        if (!root_.empty() && root_.back() != '/' && root_.back() != '\\') root_ += '/';
     }
     bool fetch(const std::string& path, std::vector<uint8_t>& out, std::string* err, bool) override {
-        const std::string full = isAbsolute(path) ? path : root_ + path;
+        const std::string full = isAbsolutePath(path) ? path : root_ + path;
         if (readFile(full, out)) return true;
         if (err) *err = "cannot read " + full;
         return false;
@@ -73,28 +90,6 @@ public:
 private:
     std::string root_;
 };
-
-size_t curlWrite(char* ptr, size_t size, size_t n, void* user) {
-    auto* buf = static_cast<std::vector<uint8_t>*>(user);
-    buf->insert(buf->end(), ptr, ptr + size * n);
-    return size * n;
-}
-
-size_t curlHeader(char* ptr, size_t size, size_t n, void* user) {
-    auto* etag = static_cast<std::string*>(user);
-    std::string line(ptr, size * n);
-    if (line.size() > 5) {
-        std::string key = line.substr(0, 5);
-        std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-        if (key == "etag:") {
-            std::string v = line.substr(5);
-            v.erase(0, v.find_first_not_of(" \t"));
-            v.erase(v.find_last_not_of(" \t\r\n") + 1);
-            *etag = v;
-        }
-    }
-    return size * n;
-}
 
 std::string urlEncodePath(const std::string& p) {
     static const char* hex = "0123456789ABCDEF";
@@ -111,12 +106,6 @@ std::string urlEncodePath(const std::string& p) {
     return out;
 }
 
-// One CURL easy handle per worker thread so connections are kept alive between requests.
-struct CurlHandle {
-    CURL* h = curl_easy_init();
-    ~CurlHandle() { if (h) curl_easy_cleanup(h); }
-};
-
 class HttpSource final : public ImageSource {
 public:
     HttpSource(std::string base, std::string cacheDir) : base_(std::move(base)) {
@@ -129,11 +118,12 @@ public:
 
     bool fetch(const std::string& path, std::vector<uint8_t>& out, std::string* err,
                bool revalidate) override {
-        if (isAbsolute(path)) return readFile(path, out);
+        if (isAbsolutePath(path)) return readFile(path, out);
 
         const std::string cachePath = cacheRoot_ + path;
         const std::string etagPath = cachePath + ".etag";
-        const bool cached = fs::exists(cachePath);
+        std::error_code ec;
+        const bool cached = fs::exists(toPath(cachePath), ec);
 
         if (cached && !revalidate && wasValidated(path)) return readFile(cachePath, out);
         if (offlineNow()) {
@@ -142,56 +132,32 @@ public:
             return false;
         }
 
-        thread_local CurlHandle curl;
-        if (!curl.h) {
-            if (err) *err = "curl init failed";
-            return false;
-        }
-        std::vector<uint8_t> body;
-        std::string etag;
         std::string oldEtag;
         if (cached) {
             std::vector<uint8_t> e;
             if (readFile(etagPath, e)) oldEtag.assign(e.begin(), e.end());
         }
         const std::string url = base_ + urlEncodePath(path);
-        curl_slist* headers = nullptr;
-        if (!oldEtag.empty()) headers = curl_slist_append(headers, ("If-None-Match: " + oldEtag).c_str());
+        HttpResponse r = httpGet(url, oldEtag);
 
-        curl_easy_reset(curl.h);
-        curl_easy_setopt(curl.h, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl.h, CURLOPT_WRITEFUNCTION, curlWrite);
-        curl_easy_setopt(curl.h, CURLOPT_WRITEDATA, &body);
-        curl_easy_setopt(curl.h, CURLOPT_HEADERFUNCTION, curlHeader);
-        curl_easy_setopt(curl.h, CURLOPT_HEADERDATA, &etag);
-        curl_easy_setopt(curl.h, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl.h, CURLOPT_CONNECTTIMEOUT_MS, 3000L);
-        curl_easy_setopt(curl.h, CURLOPT_TIMEOUT_MS, 30000L);
-        curl_easy_setopt(curl.h, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl.h, CURLOPT_NOSIGNAL, 1L);
-        const CURLcode rc = curl_easy_perform(curl.h);
-        long status = 0;
-        curl_easy_getinfo(curl.h, CURLINFO_RESPONSE_CODE, &status);
-        curl_slist_free_all(headers);
-
-        if (rc != CURLE_OK) {
+        if (!r.transportOk) {
             markOffline();
             if (cached && readFile(cachePath, out)) return true;
-            if (err) *err = std::string("http error: ") + curl_easy_strerror(rc) + " (" + url + ")";
+            if (err) *err = r.error;
             return false;
         }
-        if (status == 304 && cached) {
+        if (r.status == 304 && cached) {
             markValidated(path);
             return readFile(cachePath, out);
         }
-        if (status == 200) {
-            writeFileAtomic(cachePath, body.data(), body.size());
-            if (!etag.empty()) writeFileAtomic(etagPath, etag.data(), etag.size());
+        if (r.status == 200) {
+            writeFileAtomic(cachePath, r.body.data(), r.body.size());
+            if (!r.etag.empty()) writeFileAtomic(etagPath, r.etag.data(), r.etag.size());
             markValidated(path);
-            out = std::move(body);
+            out = std::move(r.body);
             return true;
         }
-        if (err) *err = "http " + std::to_string(status) + " for " + url;
+        if (err) *err = "http " + std::to_string(r.status) + " for " + url;
         return false;
     }
 

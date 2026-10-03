@@ -25,10 +25,26 @@ struct UiActions {
     bool save = false;
     bool reloadServer = false;
     bool quit = false;
+    // desktop / screensaver
+    bool sourceChanged = false;    // image source field applied
+    bool clearCustom = false;      // drop the drag & dropped files, back to server/folder images
+    bool toggleFullscreen = false;
+    bool saveAndClose = false;     // screensaver settings window: Save & Close
+    bool closeNoSave = false;
+    bool presetChanged = false;    // quality preset picked
+};
+
+// What the settings panel needs to know about the running program.
+struct PanelContext {
+    bool configMode = false;       // Windows screensaver settings window (/c)
+    bool windowed = false;
+    bool hasCustomFiles = false;
+    std::string pacing;            // frame pacing description
 };
 
 struct StatsInfo {
     const FrameStats* frames = nullptr;
+    float gpuMs = 0.0f;  // desktop GL timer queries; 0 = unavailable
     int drawCalls = 0;
     size_t texturesResident = 0;
     size_t textureMB = 0;
@@ -48,7 +64,7 @@ struct StatsInfo {
 
 class Ui {
 public:
-    bool init(SDL_Window* window, SDL_GLContext ctx, int minScreenDim);
+    bool init(SDL_Window* window, SDL_GLContext ctx, int minScreenDim, const char* glslVersion);
     void shutdown();
     bool processEvent(const SDL_Event& e);  // true if ImGui wants the event
     bool wantsKeyboard() const;
@@ -56,7 +72,7 @@ public:
     void beginFrame(int logicalW, int logicalH);
     void endFrame();  // renders draw data into the bound framebuffer
 
-    UiActions settingsPanel(Config& cfg, float maxAniso);
+    UiActions settingsPanel(Config& cfg, float maxAniso, const PanelContext& pc);
     void statsOverlay(const StatsInfo& info);
     void loadingOverlay(const std::string& title, const std::string& sub);
     void toast(const std::string& msg, float seconds = 2.5f);

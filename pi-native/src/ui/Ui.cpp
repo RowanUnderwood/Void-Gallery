@@ -64,7 +64,7 @@ bool comboInt(const char* label, int& v, const std::vector<int>& items) {
 
 }  // namespace
 
-bool Ui::init(SDL_Window* window, SDL_GLContext ctx, int minScreenDim) {
+bool Ui::init(SDL_Window* window, SDL_GLContext ctx, int minScreenDim, const char* glslVersion) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -75,7 +75,7 @@ bool Ui::init(SDL_Window* window, SDL_GLContext ctx, int minScreenDim) {
     ImGui::GetStyle().ScaleAllSizes(k);
     io.FontGlobalScale = k;
     if (!ImGui_ImplSDL2_InitForOpenGL(window, ctx)) return false;
-    if (!ImGui_ImplOpenGL3_Init("#version 300 es")) return false;
+    if (!ImGui_ImplOpenGL3_Init(glslVersion)) return false;
     initialized_ = true;
     return true;
 }
@@ -160,6 +160,7 @@ void Ui::statsOverlay(const StatsInfo& s) {
     const FrameStats& f = *s.frames;
     ImGui::Text("%.1f fps   avg %.2f ms   p99 %.2f ms   cpu %.2f ms", f.fps(), f.avgMs(), f.percentileMs(0.99f),
                 f.cpuMs());
+    if (s.gpuMs > 0.0f) ImGui::Text("gpu %.2f ms per frame", s.gpuMs);
     ImGui::PlotLines("##ft", f.history(), static_cast<int>(f.count()), static_cast<int>(f.historyOffset()), nullptr,
                      0.0f, 50.0f, ImVec2(360, 50));
     ImGui::Text("draws %d   render %dx%d   auto-quality L%d", s.drawCalls, s.renderW, s.renderH, s.autoQualityLevel);
@@ -173,7 +174,7 @@ void Ui::statsOverlay(const StatsInfo& s) {
     ImGui::End();
 }
 
-UiActions Ui::settingsPanel(Config& cfg, float maxAniso) {
+UiActions Ui::settingsPanel(Config& cfg, float maxAniso, const PanelContext& pc) {
     UiActions a;
     if (!settingsVisible) return a;
     ModeSettings& m = cfg.cur();
@@ -185,11 +186,27 @@ UiActions Ui::settingsPanel(Config& cfg, float maxAniso) {
     ImGui::SetNextWindowPos(ImVec2(ds.x - 20, 20), ImGuiCond_FirstUseEver, ImVec2(1, 0));
     ImGui::SetNextWindowSize(ImVec2(ds.x * 0.34f, ds.y * 0.85f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowBgAlpha(0.85f);
-    if (!ImGui::Begin("Settings  (H to hide)", &settingsVisible)) {
+    const char* title = pc.configMode ? "Image Tunnel Screensaver Settings" : "Settings  (H to hide)";
+    if (!ImGui::Begin(title, pc.configMode ? nullptr : &settingsVisible)) {
         ImGui::End();
         return a;
     }
     ImGui::PushItemWidth(-ImGui::GetFontSize() * 11.0f);  // leave room for the longest labels
+
+    if (pc.configMode) {
+        if (ImGui::Button("Save & Close")) a.saveAndClose = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Save")) a.save = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Close without saving")) a.closeNoSave = true;
+        ImGui::Separator();
+    }
+    if (caps::kDesktop) {
+        ImGui::InputTextWithHint("Image Source", "http://server:port/  or  C:\\path\\to\\web-root", &pi.source);
+        if (ImGui::IsItemDeactivatedAfterEdit()) a.sourceChanged = true;
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Apply")) a.sourceChanged = true;
+    }
 
     // "random" is a fifth choice layered on the four real modes (kept in globals.pi so the web
     // viewer never sees an unknown activeMode).
@@ -212,6 +229,14 @@ UiActions Ui::settingsPanel(Config& cfg, float maxAniso) {
 
     if (ImGui::CollapsingHeader("General", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Checkbox("Show Performance", &g.showStats);
+        if (caps::kDesktop) {
+            ImGui::Checkbox("3D SBS Mode", &g.useStereo);
+            if (g.useStereo) {
+                sliderD("3D Separation", m.stereoEyeSep, 0.0, 2.0);
+                sliderD("SBS FOV Widen", m.stereoFOVBoost, 0.0, 80.0, "%.0f");
+            }
+            if (pc.windowed && ImGui::Button("Toggle Fullscreen (F11)")) a.toggleFullscreen = true;
+        }
         if (ImGui::Button("Save Config")) a.save = true;
         ImGui::SameLine();
         if (ImGui::Button("Reload from server (R)")) a.reloadServer = true;
@@ -255,11 +280,13 @@ UiActions Ui::settingsPanel(Config& cfg, float maxAniso) {
         ImGui::InputInt("End #", &g.serverEnd);
         if (ImGui::Button("Reload Range")) a.reloadSequence = true;
         ImGui::Separator();
-        ImGui::TextDisabled("Local folder (replaces browser upload)");
+        ImGui::TextDisabled(caps::kDesktop ? "Local folder (or drag & drop images / a folder onto the window)"
+                                           : "Local folder (replaces browser upload)");
         ImGui::InputText("Folder path", &pi.localFolder);
         if (ImGui::Checkbox("Use local folder", &pi.useLocalFolder)) a.reloadSequence = true;
-        if (pi.useLocalFolder && ImGui::Button("Clear custom (back to server)")) {
+        if ((pi.useLocalFolder || pc.hasCustomFiles) && ImGui::Button("Clear custom (back to server)")) {
             pi.useLocalFolder = false;
+            a.clearCustom = true;
             a.reloadSequence = true;
         }
     }
@@ -273,15 +300,23 @@ UiActions Ui::settingsPanel(Config& cfg, float maxAniso) {
         a.rebuild |= sliderIFinish("Image Count", m.mazeImageCount, 5, caps::kMaxMazeImages);
         sliderD("Spotlight Size", m.mazeSpotlightAngle, 0.1, 3.14159 / 2);
         sliderD("Spotlight Height", m.mazeSpotlightHeight, 2.0, 15.0);
-        comboStr("Shadows", pi.mazeShadows, {"off", "nearest"});
-        if (pi.mazeShadows == "nearest") comboInt("Shadow Resolution", m.mazeShadowRes, {256, 512});
+        if (caps::kDesktop) {
+            if (comboStr("Shadows", pi.mazeShadows, {"off", "nearest", "all"})) pi.qualityPreset = "custom";
+            if (pi.mazeShadows != "off" &&
+                comboInt("Shadow Resolution", m.mazeShadowRes, {256, 512, 1024, 2048, 4096}))
+                pi.qualityPreset = "custom";
+        } else {
+            comboStr("Shadows", pi.mazeShadows, {"off", "nearest"});
+            if (pi.mazeShadows == "nearest") comboInt("Shadow Resolution", m.mazeShadowRes, {256, 512});
+        }
         sliderD("Walking Speed", m.mazeWalkingSpeed, 0.2, 5.0);
         sliderD("Texture Tiling", m.mazeTextureTiling, 0.5, 8.0);
         comboStr("Nav Style", m.navStyle, {"win95", "modern"});
         a.materialsChanged |= comboStr("Wall Texture", m.mazeWallTexture, g.availableTextures);
         a.materialsChanged |= comboStr("Floor Texture", m.mazeFloorTexture, g.availableTextures);
         a.materialsChanged |= comboStr("Ceiling Texture", m.mazeCeilingTexture, g.availableTextures);
-        comboStr("Regen Transition", pi.regenTransition, {"fade", "cut"});
+        if (caps::kDesktop) comboStr("Regen Transition", pi.regenTransition, {"fade", "flip", "cut"});
+        else comboStr("Regen Transition", pi.regenTransition, {"fade", "cut"});
     }
 
     if (ImGui::CollapsingHeader("Lighting & Performance")) {
@@ -293,22 +328,50 @@ UiActions Ui::settingsPanel(Config& cfg, float maxAniso) {
         a.lightsChanged |= comboStr("Light Color", m.lightColorMode, {"random", "white"});
     }
 
-    if (ImGui::CollapsingHeader("Raspberry Pi")) {
-        if (comboInt("Frame Cap", pi.frameCap, {60, 30})) a.frameCapChanged = true;
+    if (ImGui::CollapsingHeader(caps::kDesktop ? "Display & Quality" : "Raspberry Pi",
+                                pc.configMode ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
+        bool q = false;  // any quality control touched -> preset becomes "custom"
+        if (caps::kDesktop) {
+            if (comboStr("Quality Preset", pi.qualityPreset, {"low", "medium", "high", "ultra", "custom"}))
+                a.presetChanged = true;
+            const char* capLabels[] = {"Unlocked (VRR / no vsync)", "30 fps", "60 fps", "120 fps"};
+            const int values[] = {0, 30, 60, 120};
+            int idx = pi.frameCap == 0 ? 0 : pi.frameCap <= 30 ? 1 : pi.frameCap <= 60 ? 2 : 3;
+            if (ImGui::Combo("Frame Cap", &idx, capLabels, 4)) {
+                pi.frameCap = values[idx];
+                a.frameCapChanged = true;
+            }
+            if (!pc.pacing.empty()) ImGui::TextDisabled("pacing: %s", pc.pacing.c_str());
+        } else if (comboInt("Frame Cap", pi.frameCap, {60, 30})) {
+            a.frameCapChanged = true;
+        }
         comboInt("Monitor Rotation (CW)", pi.rotation, {0, 90, 180, 270});
-        sliderD("Render Scale", pi.renderScale, 0.5, 1.0, "%.2f");
-        comboInt("MSAA", pi.msaa, {0, 4});
-        sliderI("Lights per Draw", pi.maxLights, 1, caps::kMaxLightsPerDraw);
-        ImGui::Checkbox("Normal Maps (maze)", &pi.normalMaps);
-        if (comboInt("Max Texture Edge", pi.maxTextureEdge, {256, 512, 1024, 2048})) a.resetReload = true;
-        a.resetReload |= sliderIFinish("Texture Budget (MB)", pi.textureMemoryMB, 128, 2048);
+        q |= sliderD("Render Scale", pi.renderScale, 0.5, caps::kMaxRenderScale, "%.2f");
+        if (caps::kDesktop) q |= comboInt("MSAA", pi.msaa, {0, 2, 4, 8});
+        else q |= comboInt("MSAA", pi.msaa, {0, 4});
+        q |= sliderI("Lights per Draw", pi.maxLights, 1, caps::kMaxLightsPerDraw);
+        q |= ImGui::Checkbox("Normal Maps (maze)", &pi.normalMaps);
+        if (caps::kDesktop) q |= ImGui::Checkbox("Roughness Maps (maze)", &pi.roughnessMaps);
+        const std::vector<int> edges = caps::kDesktop ? std::vector<int>{512, 1024, 2048, 4096}
+                                                      : std::vector<int>{256, 512, 1024, 2048};
+        if (comboInt("Max Texture Edge", pi.maxTextureEdge, edges)) {
+            a.resetReload = true;
+            q = true;
+        }
+        a.resetReload |= sliderIFinish("Texture Budget (MB)", pi.textureMemoryMB, 128, caps::kDesktop ? 8192 : 2048);
         int uploadMB = std::max(1, pi.uploadBytesPerFrame / (1024 * 1024));
-        if (sliderI("Upload MB / Frame", uploadMB, 1, 32)) pi.uploadBytesPerFrame = uploadMB * 1024 * 1024;
+        if (sliderI("Upload MB / Frame", uploadMB, 1, caps::kDesktop ? 128 : 32))
+            pi.uploadBytesPerFrame = uploadMB * 1024 * 1024;
         ImGui::Checkbox("Auto Quality", &pi.autoQuality);
+        if (q && caps::kDesktop) pi.qualityPreset = "custom";
     }
 
     ImGui::Separator();
-    if (ImGui::Button("Quit (stop kiosk)")) a.quit = true;  // exit 10: systemd leaves it stopped
+    if (!caps::kDesktop) {
+        if (ImGui::Button("Quit (stop kiosk)")) a.quit = true;  // exit 10: systemd leaves it stopped
+    } else if (!pc.configMode) {
+        if (ImGui::Button("Quit")) a.quit = true;
+    }
     ImGui::PopItemWidth();
     ImGui::End();
     return a;

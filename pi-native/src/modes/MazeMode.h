@@ -26,6 +26,7 @@ public:
     bool busy() const override;
     std::string status() const override;
     bool usesMovingLights() const override { return false; }
+    float frameSquish() const override;
 
     void syncMaterials();               // (re)load wall/floor/ceiling textures if the config changed
     void reloadMaterials();             // force reload (e.g. image source changed)
@@ -38,6 +39,7 @@ private:
         std::string name;
         GLuint color = 0;
         GLuint normal = 0;
+        GLuint rough = 0;   // desktop only (roughness maps)
         int pending = 0;
         uint64_t token = 0;
     };
@@ -78,8 +80,8 @@ private:
     void updateNav(float dt);
     void updateSpots(float dt);
     void startRegen();
-    void ensureShadowTarget(int size);
-    void renderShadow(const glm::vec3& lightPos, const glm::vec3& target, const glm::vec3& up);
+    void ensureShadowTarget(int size, int layers);
+    glm::mat4 renderShadow(int layer, const glm::vec3& lightPos, const glm::vec3& target, const glm::vec3& up);
     glm::vec3 spotPosition(const Painting& p) const;
     glm::vec3 exitPosition() const;
 
@@ -93,7 +95,7 @@ private:
     std::vector<Painting> paintings_;
     std::vector<Task> tasks_;
     bool framesDirty_ = false;
-    std::array<Spot, 4> spots_;
+    std::array<Spot, caps::kMaxSpots> spots_;
 
     int exitRow_ = 1, exitCol_ = 1;
     bool exitVisible_ = false;
@@ -103,10 +105,12 @@ private:
     Regen regen_ = Regen::None;
     float fade_ = 0.0f;
 
+    // Shadow maps: one GL_TEXTURE_2D_ARRAY depth texture, one layer per shadowed spotlight.
     GLuint shadowFbo_ = 0, shadowTex_ = 0;
-    int shadowSize_ = 0;
-    int shadowSpot_ = -1;
-    glm::mat4 shadowMat_{1.0f};
+    int shadowSize_ = 0, shadowLayers_ = 0;
+    uint64_t shadowFrame_ = ~0ull;            // shadow maps are rendered once per frame (stereo renders twice)
+    int spotShadow_[caps::kShaderSpots] = {};
+    glm::mat4 shadowMats_[caps::kShaderSpots];
 };
 
 }  // namespace it

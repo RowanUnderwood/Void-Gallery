@@ -38,8 +38,8 @@ void CardBatch::draw(ModeContext& ctx) {
     auto drawItem = [&](const Item& it) {
         int idx[caps::kMaxLightsPerDraw];
         const int n = ctx.lights.nearest(glm::vec3(it.model[3]), maxLights, idx);
-        glm::vec3 pos[4], col[4];
-        float range[4];
+        glm::vec3 pos[caps::kShaderLights], col[caps::kShaderLights];
+        float range[caps::kShaderLights];
         for (int i = 0; i < n; ++i) {
             pos[i] = lights[idx[i]].pos;
             col[i] = lights[idx[i]].linear * intensity;

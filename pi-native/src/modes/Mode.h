@@ -29,6 +29,7 @@ struct ModeContext {
     int screenH = 1080;
     int maxLightsPerDraw = 4;   // after auto-quality
     bool normalMaps = true;     // after auto-quality
+    uint64_t frameIndex = 0;    // increments once per frame (render() may run twice in 3D SBS)
 };
 
 class Mode {
@@ -48,6 +49,8 @@ public:
     virtual bool busy() const { return false; }      // shows the loading overlay
     virtual std::string status() const { return {}; }
     virtual bool usesMovingLights() const { return true; }
+    // Horizontal squeeze of the whole frame, 1 = none (maze "flip" regeneration transition).
+    virtual float frameSquish() const { return 1.0f; }
 
 protected:
     ModeSettings& s() { return ctx_.cfg.cur(); }

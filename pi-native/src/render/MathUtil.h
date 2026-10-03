@@ -64,9 +64,20 @@ struct Camera {
     float nearZ = 0.1f;
     float farZ = 3000.0f;
     glm::mat4 clipRotation{1.0f};  // rotates the image for a turned monitor (see screenRotation())
+    // 3D SBS (three.js StereoCamera): eye offset along the camera's X axis and the matching
+    // off-axis frustum shift so both eyes converge at the focus distance.
+    float eyeOffset = 0.0f;
+    float projShiftX = 0.0f;
 
-    glm::mat4 view() const { return glm::mat4_cast(glm::conjugate(rot)) * glm::translate(glm::mat4(1.0f), -pos); }
-    glm::mat4 proj() const { return clipRotation * glm::perspective(glm::radians(fovDeg), aspect, nearZ, farZ); }
+    glm::mat4 view() const {
+        return glm::translate(glm::mat4(1.0f), glm::vec3(-eyeOffset, 0.0f, 0.0f)) * glm::mat4_cast(glm::conjugate(rot)) *
+               glm::translate(glm::mat4(1.0f), -pos);
+    }
+    glm::mat4 proj() const {
+        glm::mat4 p = glm::perspective(glm::radians(fovDeg), aspect, nearZ, farZ);
+        p[2][0] += projShiftX;
+        return clipRotation * p;
+    }
     glm::vec3 forward() const { return rot * glm::vec3(0, 0, -1); }
     void translateZ(float d) { pos += rot * glm::vec3(0, 0, d); }
 };

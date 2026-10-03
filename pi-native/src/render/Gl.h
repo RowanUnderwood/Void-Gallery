@@ -1,8 +1,7 @@
 #pragma once
 // Thin OpenGL ES 3.1 helpers: shaders, meshes, textures and the scaled/MSAA scene target.
 
-#include <GLES3/gl31.h>
-#include <GLES2/gl2ext.h>
+#include "render/GlApi.h"
 
 #include <cstdint>
 #include <string>
@@ -18,6 +17,8 @@ struct DecodedImage;
 
 namespace gl {
 
+// Desktop GL: resolve function pointers once the context is current. No-op on GLES.
+bool loadFunctions(void* (*getProc)(const char*));
 bool hasExtension(const char* name);
 float maxAnisotropy();  // 1 if unsupported
 
@@ -41,6 +42,8 @@ public:
     void set(const char* n, const glm::mat4& v) { glUniformMatrix4fv(loc(n), 1, GL_FALSE, &v[0][0]); }
     void setArray(const char* n, const glm::vec3* v, int count) { glUniform3fv(loc(n), count, &v[0][0]); }
     void setArray(const char* n, const float* v, int count) { glUniform1fv(loc(n), count, v); }
+    void setArray(const char* n, const int* v, int count) { glUniform1iv(loc(n), count, v); }
+    void setArray(const char* n, const glm::mat4* v, int count) { glUniformMatrix4fv(loc(n), count, GL_FALSE, &v[0][0][0]); }
 
 private:
     GLuint prog_ = 0;

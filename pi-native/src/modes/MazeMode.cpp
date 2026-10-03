@@ -80,6 +80,7 @@ MazeMode::~MazeMode() {
     for (auto& m : mats_) {
         if (m.color) glDeleteTextures(1, &m.color);
         if (m.normal) glDeleteTextures(1, &m.normal);
+        if (m.rough) glDeleteTextures(1, &m.rough);
     }
     if (shadowFbo_) glDeleteFramebuffers(1, &shadowFbo_);
     if (shadowTex_) glDeleteTextures(1, &shadowTex_);
@@ -107,7 +108,7 @@ void MazeMode::requestMaterial(int surface, const std::string& name) {
     Material& m = mats_[surface];
     m.name = name;
     m.token = ++matToken_;
-    m.pending = 2;
+    m.pending = caps::kDesktop ? 3 : 2;
     std::string lower = name;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
     const std::string ext = (lower.size() >= 4 && lower.compare(lower.size() - 4, 4, "-jpg") == 0) ? "jpg" : "png";
@@ -115,7 +116,8 @@ void MazeMode::requestMaterial(int surface, const std::string& name) {
     const uint64_t token = m.token;
     const int aniso = std::min(ctx_.cfg.cur().anisotropyLevel, caps::kMaxAnisotropy);
 
-    auto finish = [this, surface, token, aniso](bool isNormal, bool ok, DecodedImage&& img, const std::string& err) {
+    // kind: 0 colour (sRGB), 1 normal, 2 roughness (both linear)
+    auto finish = [this, surface, token, aniso](int kind, bool ok, DecodedImage&& img, const std::string& err) {
         Material& mat = mats_[surface];
         if (mat.token != token) return;  // superseded by a newer request
         --mat.pending;
@@ -123,18 +125,19 @@ void MazeMode::requestMaterial(int surface, const std::string& name) {
             std::fprintf(stderr, "[maze] texture load failed: %s\n", err.c_str());
             return;
         }
-        GLuint& slot = isNormal ? mat.normal : mat.color;
+        GLuint& slot = kind == 0 ? mat.color : kind == 1 ? mat.normal : mat.rough;
         if (slot) glDeleteTextures(1, &slot);
-        slot = gl::createTexture(img, gl::TextureOptions{!isNormal, true, true, aniso});
+        slot = gl::createTexture(img, gl::TextureOptions{kind == 0, true, true, aniso});
     };
-    ctx_.loader.load(ctx_.source, base + "_Color." + ext, 1024,
-                     [finish](bool ok, DecodedImage&& img, const std::string& err) mutable {
-                         finish(false, ok, std::move(img), err);
-                     });
-    ctx_.loader.load(ctx_.source, base + "_NormalGL." + ext, 1024,
-                     [finish](bool ok, DecodedImage&& img, const std::string& err) mutable {
-                         finish(true, ok, std::move(img), err);
-                     });
+    const char* suffixes[3] = {"_Color.", "_NormalGL.", "_Roughness."};
+    const int kinds = caps::kDesktop ? 3 : 2;
+    const int edge = caps::kDesktop ? 2048 : 1024;
+    for (int kind = 0; kind < kinds; ++kind) {
+        ctx_.loader.load(ctx_.source, base + suffixes[kind] + ext, edge,
+                         [finish, kind](bool ok, DecodedImage&& img, const std::string& err) mutable {
+                             finish(kind, ok, std::move(img), err);
+                         });
+    }
 }
 
 void MazeMode::syncMaterials() {
@@ -153,7 +156,15 @@ void MazeMode::setAnisotropy(int level) {
     for (auto& m : mats_) {
         if (m.color) gl::setAnisotropy(m.color, level);
         if (m.normal) gl::setAnisotropy(m.normal, level);
+        if (m.rough) gl::setAnisotropy(m.rough, level);
     }
+}
+
+float MazeMode::frameSquish() const {
+    // CSS rotateY(90deg) without perspective, as index.html's regenerateMaze() did: the frame
+    // narrows to nothing and opens again.
+    if (regen_ == Regen::None || ctx_.cfg.globals.pi.regenTransition != "flip") return 1.0f;
+    return std::cos(smoothstep01(fade_) * kPi * 0.5f);
 }
 
 void MazeMode::resetSpotColors() {
@@ -449,43 +460,43 @@ void MazeMode::updateSpots(float dt) {
     exitVisible_ = de <= kExitRadius && grid_.lineOfSight(cam.x, cam.z, ep.x, ep.z);
 }
 
-void MazeMode::ensureShadowTarget(int size) {
-    if (shadowTex_ && shadowSize_ == size) return;
+void MazeMode::ensureShadowTarget(int size, int layers) {
+    if (shadowTex_ && shadowSize_ == size && shadowLayers_ >= layers) return;
     if (shadowFbo_) glDeleteFramebuffers(1, &shadowFbo_);
     if (shadowTex_) glDeleteTextures(1, &shadowTex_);
     shadowSize_ = size;
+    shadowLayers_ = layers;
     glGenTextures(1, &shadowTex_);
-    glBindTexture(GL_TEXTURE_2D, shadowTex_);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH_COMPONENT16, size, size);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadowTex_);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_DEPTH_COMPONENT24, size, size, layers);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
     glGenFramebuffers(1, &shadowFbo_);
     glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadowTex_, 0);
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowTex_, 0, 0);
     const GLenum none = GL_NONE;
     glDrawBuffers(1, &none);
     glReadBuffer(GL_NONE);
 }
 
-void MazeMode::renderShadow(const glm::vec3& lightPos, const glm::vec3& target, const glm::vec3& up) {
+glm::mat4 MazeMode::renderShadow(int layer, const glm::vec3& lightPos, const glm::vec3& target, const glm::vec3& up) {
     GLint prevFbo = 0, vp[4];
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
     glGetIntegerv(GL_VIEWPORT, vp);
 
-    const int size = std::min(ctx_.cfg.cur().mazeShadowRes, caps::kMaxShadowRes) <= 256 ? 256 : 512;
-    ensureShadowTarget(size);
+    const int size = shadowSize_;
     const float angle = static_cast<float>(ctx_.cfg.cur().mazeSpotlightAngle);
     const glm::mat4 proj = glm::perspective(std::min(2.0f * angle + 0.1f, kPi * 0.95f), 1.0f, 1.0f, kSpotRange);
     const glm::mat4 view = glm::lookAt(lightPos, target, up);
     const glm::mat4 vp4 = proj * view;
     const glm::mat4 bias = glm::translate(glm::mat4(1.0f), glm::vec3(0.5f)) * glm::scale(glm::mat4(1.0f), glm::vec3(0.5f));
-    shadowMat_ = bias * vp4;
 
     glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo_);
+    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, shadowTex_, 0, layer);
     glViewport(0, 0, size, size);
     glClear(GL_DEPTH_BUFFER_BIT);
     glEnable(GL_POLYGON_OFFSET_FILL);
@@ -501,6 +512,7 @@ void MazeMode::renderShadow(const glm::vec3& lightPos, const glm::vec3& target, 
 
     glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
     glViewport(vp[0], vp[1], vp[2], vp[3]);
+    return bias * vp4;
 }
 
 // ----------------------------------------------------------------------------- frame
@@ -541,11 +553,10 @@ void MazeMode::render() {
     const float angle = static_cast<float>(m.mazeSpotlightAngle);
 
     // Gather active spotlights.
-    glm::vec3 sPos[4], sDir[4], sCol[4];
-    float sCos[4], sPen[4], sRange[4];
+    constexpr int N = caps::kShaderSpots;
+    glm::vec3 sPos[N], sDir[N], sCol[N];
+    float sCos[N], sPen[N], sRange[N], sDist[N];
     int nSpots = 0;
-    shadowSpot_ = -1;
-    float nearest = 1e9f;
     const int maxSpots = std::min<int>(spots_.size(), std::max(1, ctx_.maxLightsPerDraw));
     for (const auto& sp : spots_) {
         if (sp.painting < 0 || nSpots >= maxSpots) continue;
@@ -556,19 +567,43 @@ void MazeMode::render() {
         sCos[nSpots] = std::cos(angle);
         sPen[nSpots] = std::cos(angle * (1.0f - kSpotPenumbra));
         sRange[nSpots] = kSpotRange;
-        const float d = glm::distance(cam.pos, p.pos);
-        if (pi.mazeShadows == "nearest" && d < nearest) {
-            nearest = d;
-            shadowSpot_ = nSpots;
-        }
+        sDist[nSpots] = glm::distance(cam.pos, p.pos);
         ++nSpots;
     }
-    if (shadowSpot_ >= 0) {
-        // Spot direction always has a horizontal component (light sits 2 units off the wall), so
-        // its XZ part is a safe "up" vector for the light's view matrix.
-        const glm::vec3 d = sDir[shadowSpot_];
-        renderShadow(sPos[shadowSpot_], sPos[shadowSpot_] + d, glm::normalize(glm::vec3(d.x, 0.0f, d.z)));
+
+    // Shadows: "nearest" gives the closest active spot a map; "all" (desktop) gives every one.
+    // Rendered once per frame even when render() runs twice (3D SBS).
+    if (shadowFrame_ != ctx_.frameIndex) {
+        shadowFrame_ = ctx_.frameIndex;
+        for (int i = 0; i < N; ++i) spotShadow_[i] = -1;
+        int wanted = 0;
+        if (pi.mazeShadows == "all") wanted = nSpots;
+        else if (pi.mazeShadows == "nearest" && nSpots > 0) wanted = 1;
+        if (wanted > 0) {
+            int res = 256;
+            while (res < m.mazeShadowRes && res < caps::kMaxShadowRes) res *= 2;
+            ensureShadowTarget(res, pi.mazeShadows == "all" ? caps::kMaxSpots : 1);
+            int order[N];
+            for (int i = 0; i < nSpots && i < N; ++i) {  // insertion sort by distance (<= 6 entries)
+                int j = i;
+                while (j > 0 && sDist[order[j - 1]] > sDist[i]) {
+                    order[j] = order[j - 1];
+                    --j;
+                }
+                order[j] = i;
+            }
+            for (int k = 0; k < wanted; ++k) {
+                const int i = order[k];
+                // The spot always points partly sideways (it sits 2 units off the wall), so its XZ
+                // direction is a safe "up" vector for the light's view matrix.
+                const glm::vec3 d = sDir[i];
+                shadowMats_[i] = renderShadow(k, sPos[i], sPos[i] + d, glm::normalize(glm::vec3(d.x, 0.0f, d.z)));
+                spotShadow_[i] = k;
+            }
+        }
     }
+    bool anyShadow = false;
+    for (int i = 0; i < nSpots; ++i) anyShadow |= spotShadow_[i] >= 0;
 
     // Depth pre-pass over the opaque maze geometry, so the lighting below runs once per pixel
     // instead of for every wall layer behind the nearest one.
@@ -608,22 +643,26 @@ void MazeMode::render() {
         sh.setArray("uSpotPenCos", sPen, nSpots);
         sh.setArray("uSpotRange", sRange, nSpots);
     }
-    sh.set("uShadowIdx", shadowSpot_);
-    sh.set("uShadowMat", shadowMat_);
+    sh.setArray("uSpotShadow", spotShadow_, N);
+    sh.setArray("uShadowMats", shadowMats_, N);
     sh.set("uHasPoint", exitVisible_ ? 1 : 0);
     sh.set("uPointPos", exitPosition());
     sh.set("uPointColor", glm::vec3(0, 1, 1) * kExitIntensity);
     sh.set("uPointRange", kExitRange);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, shadowSpot_ >= 0 ? shadowTex_ : ctx_.gfx.dummyShadow);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, anyShadow ? shadowTex_ : ctx_.gfx.dummyShadow);
 
     const bool useNormals = pi.normalMaps && ctx_.normalMaps;
+    const bool useRough = caps::kDesktop && pi.roughnessMaps;
     auto bindSurface = [&](const Material& mat) {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, mat.color ? mat.color : ctx_.gfx.white);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, mat.normal ? mat.normal : ctx_.gfx.flatNormal);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, mat.rough ? mat.rough : ctx_.gfx.white);
         sh.set("uUseNormal", useNormals && mat.normal ? 1 : 0);
+        sh.set("uUseRough", useRough && mat.rough ? 1 : 0);
     };
 
     sh.set("uModel", glm::mat4(1.0f));
@@ -647,6 +686,7 @@ void MazeMode::render() {
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, ctx_.gfx.white);
     sh.set("uUseNormal", 0);
+    sh.set("uUseRough", 0);
     sh.set("uWorldUv", 0);
     sh.set("uUvScale", glm::vec2(1.0f));
     sh.set("uTint", srgbToLinear(hexColor(0x1a110a)));
@@ -727,7 +767,8 @@ void MazeMode::renderOverlay() {
         a = glm::scale(a, {cell, cell, 1});
         gfx.drawMesh2D(arrow_, a, {1.0f, 0x44 / 255.0f, 0x44 / 255.0f, 1.0f}, W, H);
     }
-    if (fade_ > 0.0f) gfx.drawRect2D(0, 0, static_cast<float>(W), static_cast<float>(H), {0, 0, 0, fade_}, W, H);
+    if (fade_ > 0.0f && ctx_.cfg.globals.pi.regenTransition != "flip")
+        gfx.drawRect2D(0, 0, static_cast<float>(W), static_cast<float>(H), {0, 0, 0, fade_}, W, H);
 }
 
 }  // namespace it

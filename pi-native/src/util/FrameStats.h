@@ -12,11 +12,12 @@ class FrameStats {
 public:
     static constexpr size_t kHistory = 240;
 
-    void push(float frameMs, float cpuMs);
+    void push(float frameMs, float cpuMs, float gpuMs = 0.0f);
     float fps() const;
     float avgMs() const;
     float percentileMs(float p) const;  // over the history window
     float cpuMs() const { return cpu_; }
+    float gpuMs() const { return gpu_; }
     const float* history() const { return hist_.data(); }
     size_t historyOffset() const { return head_; }
     size_t count() const { return count_; }
@@ -26,6 +27,7 @@ private:
     size_t head_ = 0;
     size_t count_ = 0;
     float cpu_ = 0.0f;
+    float gpu_ = 0.0f;
 };
 
 // Records every frame for --bench and writes a CSV + summary.
@@ -33,12 +35,12 @@ class BenchRecorder {
 public:
     void start(const std::string& mode, float seconds, float refreshHz);
     bool active() const { return active_; }
-    bool record(float frameMs, float cpuMs, size_t texMB, const std::string& throttle);  // false when done
+    bool record(float frameMs, float cpuMs, float gpuMs, size_t texMB, const std::string& throttle);  // false when done
     // Prints a summary; returns true if p99 <= 33.3 ms.
     bool finish(const std::string& csvPath) const;
 
 private:
-    struct Sample { float frameMs, cpuMs; size_t texMB; std::string throttle; };
+    struct Sample { float frameMs, cpuMs, gpuMs; size_t texMB; std::string throttle; };
     std::vector<Sample> samples_;
     std::string mode_;
     float seconds_ = 0, elapsed_ = 0, refreshHz_ = 60;

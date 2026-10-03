@@ -25,7 +25,8 @@ bool Renderer::init() {
     maze.use();
     maze.set("uAlbedo", 0);
     maze.set("uNormalMap", 1);
-    maze.set("uShadowMap", 2);
+    maze.set("uShadowMaps", 2);
+    maze.set("uRoughMap", 3);
 
     uploadGeometry(quad, prim::plane());
     uploadGeometry(sphere, prim::sphere(1.0f, 8, 8));
@@ -43,12 +44,12 @@ bool Renderer::init() {
     flatNormal = gl::createSolidTexture(128, 128, 255, 255);
 
     glGenTextures(1, &dummyShadow);
-    glBindTexture(GL_TEXTURE_2D, dummyShadow);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_DEPTH_COMPONENT16, 1, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, dummyShadow);
+    glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_DEPTH_COMPONENT16, 1, 1, 1);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     return true;
 }
 
@@ -82,9 +83,10 @@ void Renderer::drawMesh2D(const gl::Mesh& mesh, const glm::mat4& model, const gl
     ++drawCalls;
 }
 
-void Renderer::drawRotated(GLuint texture, int rotation) {
+void Renderer::drawRotated(GLuint texture, int rotation, const glm::vec2& scale) {
     present.use();
     present.set("uRotation", rotation);
+    present.set("uScale", scale);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, texture);
     screenQuad.draw();
