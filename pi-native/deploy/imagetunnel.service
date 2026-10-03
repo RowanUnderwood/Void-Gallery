@@ -1,0 +1,21 @@
+[Unit]
+Description=Image Tunnel kiosk (native Raspberry Pi viewer)
+After=network-online.target systemd-user-sessions.service
+Wants=network-online.target
+# Keep the login prompt off the display the app drives.
+Conflicts=getty@tty1.service
+
+[Service]
+User=@USER@
+SupplementaryGroups=video render input
+Environment=SDL_VIDEODRIVER=kmsdrm
+# IMAGETUNNEL_SOURCE / IMAGETUNNEL_ARGS are set by install.sh
+EnvironmentFile=-/etc/default/imagetunnel
+ExecStart=/opt/imagetunnel/bin/imagetunnel --source ${IMAGETUNNEL_SOURCE} $IMAGETUNNEL_ARGS
+# Esc (exit 0) or a crash restarts the viewer; Ctrl+Q (exit 10) leaves it stopped.
+Restart=always
+RestartSec=2
+RestartPreventExitStatus=10
+
+[Install]
+WantedBy=multi-user.target

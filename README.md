@@ -10,10 +10,11 @@ The project includes a robust Python asset pipeline that optimizes, resizes, and
 
 ### Frontend (WebGL)
 
-#### Three Unique Display Modes:
+#### Four Display Modes:
 1. **Floating**: Images float in a chaotic, zero-gravity void with wobble effects.
 2. **Tunnel**: An infinite, cylindrical tunnel of images with adjustable curvature and speed.
 3. **Grid**: A multi-layered, spiraling grid system that moves toward the camera.
+4. **Maze**: A procedurally generated first-person maze with images hung as spotlit paintings, a minimap and an exit portal that regenerates the maze.
 
 #### Performance Optimized:
 - Uses shared geometry instancing to reduce draw calls.
@@ -105,11 +106,11 @@ Start your local web server and open `index.html`.
 
 ### In-App Controls (GUI)
 Press `H` to open the settings panel. Key controls include:
-- **Mode**: Switch between Floating, Tunnel, and Grid.
+- **Mode**: Switch between Floating, Tunnel, Grid, and Maze.
 - **Texture Throttle**: Adjust textures per frame to balance loading speed and frame rate.
 - **Geometry**: Modify tunnel radius, image size, and grid spacing.
 - **Lighting**: Adjust ambient intensity and moving point lights.
-- **Save Config**: Downloads a `tunnel_config.json` file with your current presets.
+- **Save Config**: Saves your current settings in the browser (localStorage). They override `tunnel_config.json` on that browser.
 
 ---
 
@@ -120,6 +121,24 @@ Modify the top of `process_assets.py` to change target folders:
 TARGET_DIRS = ["movieposters", "transparentimages", "images"]
 TARGET_EXT = ".webp"
 ```
+
+---
+
+### Management GUI
+`python gui.py` (or `rungui.bat`) starts a Gradio app at http://127.0.0.1:7860. It has three tabs:
+- **Ingestion & Pipeline:** upload images and run the asset pipeline.
+- **Gallery:** browse and delete processed images.
+- **Manage Global Settings:** edit `tunnel_config.json` on disk.
+
+Raspberry Pi browsers load `tunnel_config_potato.json`, a lighter preset, instead of `tunnel_config.json`.
+
+Maze mode needs wall, floor and ceiling textures in `textures/<Name>/<Name>_{Color,NormalGL,Roughness}.{jpg,png}`. The ones used here are ambientCG sets such as `Bricks003_1K-JPG`. They aren't stored in this repo because of their size; download them and list them in `globals.availableTextures`.
+
+---
+
+## 🍓 Native Raspberry Pi 5 Viewer
+
+`pi-native/` is a C++20 / SDL2 / OpenGL ES 3.1 port of all four modes, plus a fifth "random" mode, for the Raspberry Pi 5. It runs as a fullscreen kiosk and holds a locked 30 fps, including on a portrait (rotated) monitor. It reads the same image folders and config files, over HTTP from this site or from a local copy. See [`pi-native/README.md`](pi-native/README.md) and [`PI_NATIVE_PLAN.md`](PI_NATIVE_PLAN.md).
 
 ---
 
