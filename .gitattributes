@@ -1,0 +1,5 @@
+# Files that run on the Pi (or in Linux containers) must keep LF line endings even with
+# core.autocrlf=true on Windows; CRLF breaks bash scripts and systemd units.
+pi-native/** text=auto eol=lf
+*.sh text eol=lf
+*.service text eol=lf
