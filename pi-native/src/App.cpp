@@ -102,6 +102,7 @@ int App::run(const AppOptions& opts) {
     while (running_) frame();
 
     if (!opts_.benchMode.empty()) {
+        if (mode_) std::printf("[bench] %s\n", mode_->status().c_str());
         benchPassed_ = bench_.finish(opts_.benchCsv);
         exitCode_ = benchPassed_ ? 0 : kExitBenchFail;
     }
