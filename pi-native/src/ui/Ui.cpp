@@ -256,7 +256,12 @@ UiActions Ui::settingsPanel(Config& cfg, float maxAniso, const PanelContext& pc)
             sliderD("Path Randomness", m.pathRandomness, 0, 1);
             sliderI("Edge Buffer", m.gridEdgeBuffer, 0, 5);
         }
-        if (mode == "floating") a.resetReload |= sliderIFinish("Float Count", m.totalImages, 10, caps::kMaxFloating);
+        if (mode == "floating") {
+            a.resetReload |= sliderIFinish("Float Count", m.totalImages, 10, caps::kMaxFloating);
+            // off = pass through (index.html); make way = slide apart / gentle bumps; physics = Jolt
+            // rigid bodies (they spin from hits unless Stop Rotation is ticked).
+            comboStr("Collisions", m.floatingCollisions, {"off", "makeway", "physics"});
+        }
     }
 
     if (ImGui::CollapsingHeader("Images")) {

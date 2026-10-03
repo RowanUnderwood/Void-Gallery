@@ -21,6 +21,7 @@ struct GpuTexture {
     int width = 0;
     int height = 0;
     bool hasAlpha = false;
+    float opaque[4] = {0.0f, 0.0f, 1.0f, 1.0f};  // u0, v0, u1, v1 of the visible pixels
     size_t bytes = 0;
     std::string key;
     float ratio() const { return height > 0 ? static_cast<float>(width) / height : 1.0f; }

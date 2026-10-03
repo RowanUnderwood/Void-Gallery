@@ -26,7 +26,7 @@ constexpr double kConfigVersion = 2.2;
     X(bool, showMazeMap) X(int, mazeComplexity) X(double, mazeWalkingSpeed)                       \
     X(double, mazeTextureTiling) X(int, mazeImageCount) X(double, mazeSpotlightAngle)             \
     X(double, mazeSpotlightHeight) X(int, mazeShadowRes) X(std::string, navStyle)                 \
-    X(std::string, mazeWallTexture) X(std::string, mazeFloorTexture) X(std::string, mazeCeilingTexture)     X(double, stereoEyeSep) X(double, stereoFOVBoost)
+    X(std::string, mazeWallTexture) X(std::string, mazeFloorTexture) X(std::string, mazeCeilingTexture)     X(double, stereoEyeSep) X(double, stereoFOVBoost) X(std::string, floatingCollisions)
 
 struct ModeSettings {
     // Defaults match the `config` object in index.html.
@@ -65,6 +65,9 @@ struct ModeSettings {
     std::string mazeCeilingTexture = "OfficeCeiling001_1K-PNG";
     double stereoEyeSep = 0.064;       // 3D SBS (desktop builds only)
     double stereoFOVBoost = 30.0;
+    // Floating mode: "off" (cards pass through each other, as index.html did), "makeway" (they slide
+    // apart / bump gently and never pass through) or "physics" (native: Jolt rigid bodies).
+    std::string floatingCollisions = "makeway";
 };
 
 // Native-app settings (Pi and Windows), stored under globals.pi (ignored by the web viewer).

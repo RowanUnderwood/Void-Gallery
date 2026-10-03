@@ -124,6 +124,21 @@ The **Frame Cap** options are 30, 60 (the default), 120 or Unlocked.
 - **Full limits:** 50 tunnel rows, a 20×20 grid, 500 floating images, a 41×41 maze, 200 paintings, 20 lights, 16× anisotropy, MSAA 8×,
   render scale up to 2×.
 
+### Floating mode collisions
+
+The images fly toward the camera at speeds between 1.0× and 1.5×, so faster ones catch up with slower ones.
+`index.html` let them pass through each other, which made a visible "pop" whenever two overlapping images
+swapped depth order. **Collisions** in the floating settings (`modes.floating.floatingCollisions`) controls this:
+
+| Value | Behaviour | Cost (measured) |
+|---|---|---|
+| `off` | Pass through, as `index.html` did. About 2.5 pops per second with 112 images. | none |
+| `makeway` (default) | Overlapping images slide apart sideways before they meet; if they still touch, they bump gently (momentum conserved) and stay a small gap apart. Zero pops measured. | 0.07 ms for 500 images |
+| `physics` | Native only. [Jolt](https://github.com/jrouwe/JoltPhysics) rigid bodies: off-centre hits make images spin, unless **Stop Rotation** is ticked, in which case they only translate. The same gentle drift toward the camera and containment in the ring apply. | 0.2 ms for 112 images, 1.2 ms for 500 (Ryzen 9950X3D) |
+
+Collisions use each image's visible pixels, not the whole rectangle, so cut-out (transparent) images
+bump where they actually look solid. The web version supports `off` and `makeway`, and treats `physics` as `makeway`.
+
 ### Random mode
 
 "random" is a fifth choice in **Display Mode**. Every *Switch Every (s)* seconds it fades to black and

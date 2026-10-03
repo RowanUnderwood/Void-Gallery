@@ -8,6 +8,7 @@
 
 #include "assets/Decoder.h"
 #include "config/Config.h"
+#include "modes/MakeWay.h"
 #include "modes/MazeGen.h"
 #include "modes/TunnelUv.h"
 
@@ -147,7 +148,27 @@ static void testDownscale() {
     CHECK(dst[3] == 255);
 }
 
+// Make-way: an overlapping faster card must never pass a slower one; a non-overlapping card is
+// unaffected and keeps its cruise speed.
+static void testMakeWay() {
+    MakeWayParams p;
+    std::vector<FloatBody> b(3);
+    b[0].pos = {50, 0, -100};  b[0].cruise = b[0].vel.z = 15;  b[0].half = {30, 30};  // fast, behind
+    b[1].pos = {55, 5, -60};   b[1].cruise = b[1].vel.z = 10;  b[1].half = {30, 30};  // slow, ahead, overlapping
+    b[2].pos = {-60, 0, -80};  b[2].cruise = b[2].vel.z = 12;  b[2].half = {20, 20};  // far away on screen
+    bool passed = false;
+    for (int i = 0; i < 1200; ++i) {  // 10 s at 120 Hz
+        stepMakeWay(b, 1.0f / 120.0f, p);
+        const bool stillOverlap = std::abs(b[0].pos.x - b[1].pos.x) < 60 && std::abs(b[0].pos.y - b[1].pos.y) < 60;
+        if (stillOverlap && b[0].pos.z > b[1].pos.z) passed = true;
+    }
+    CHECK(!passed);
+    CHECK(std::abs(b[2].vel.z - 12.0f) < 1e-3f);
+    CHECK(std::abs(b[2].vel.x) < 1e-3f);
+}
+
 int main() {
+    testMakeWay();
     testMazeConnected();
     testLineOfSight();
     testTunnelUv();

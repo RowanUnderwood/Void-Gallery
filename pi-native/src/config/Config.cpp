@@ -280,6 +280,8 @@ void Config::clampToPlatform() {
         m.tunnelRotation = ((m.tunnelRotation % 360) + 360) % 360 / 90 * 90;
         m.mazeWalkingSpeed = std::clamp(m.mazeWalkingSpeed, 0.1, 5.0);
         if (m.navStyle != "win95" && m.navStyle != "modern") m.navStyle = "win95";
+        if (m.floatingCollisions != "off" && m.floatingCollisions != "makeway" && m.floatingCollisions != "physics")
+            m.floatingCollisions = "makeway";
         if (m.lightColorMode != "white" && m.lightColorMode != "random") m.lightColorMode = "white";
     }
     auto& pi = globals.pi;

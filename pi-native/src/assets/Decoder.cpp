@@ -30,6 +30,27 @@ bool scanAlpha(const std::vector<uint8_t>& rgba) {
     return false;
 }
 
+// Tight bounds of the visible pixels (rows are already bottom-first, so v is GL-style).
+void opaqueBounds(DecodedImage& img) {
+    if (!img.hasAlpha) return;
+    int x0 = img.width, y0 = img.height, x1 = -1, y1 = -1;
+    for (int y = 0; y < img.height; ++y) {
+        const uint8_t* row = img.rgba.data() + static_cast<size_t>(y) * img.width * 4;
+        for (int x = 0; x < img.width; ++x) {
+            if (row[x * 4 + 3] < 32) continue;
+            x0 = std::min(x0, x);
+            x1 = std::max(x1, x);
+            y0 = std::min(y0, y);
+            y1 = std::max(y1, y);
+        }
+    }
+    if (x1 < 0) return;  // fully transparent: keep the whole rectangle
+    img.opaqueU0 = static_cast<float>(x0) / img.width;
+    img.opaqueU1 = static_cast<float>(x1 + 1) / img.width;
+    img.opaqueV0 = static_cast<float>(y0) / img.height;
+    img.opaqueV1 = static_cast<float>(y1 + 1) / img.height;
+}
+
 // GL samples row 0 as the bottom of a texture, while decoders emit the top row first. three.js
 // flips every texture on upload (Texture.flipY = true); doing the same here keeps all UV math
 // (tunnel tiles, normal maps) identical to index.html.
@@ -118,6 +139,7 @@ bool decodeImage(const uint8_t* data, size_t size, int maxEdge, DecodedImage& ou
             return false;
         }
         out.hasAlpha = cfg.input.has_alpha && scanAlpha(out.rgba);
+        opaqueBounds(out);
         return true;
     }
 
@@ -137,6 +159,7 @@ bool decodeImage(const uint8_t* data, size_t size, int maxEdge, DecodedImage& ou
     stbi_image_free(px);
     flipRows(out.rgba, tw, th);
     out.hasAlpha = (n == 2 || n == 4) && scanAlpha(out.rgba);
+    opaqueBounds(out);
     return true;
 }
 

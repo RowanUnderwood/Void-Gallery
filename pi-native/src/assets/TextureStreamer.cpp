@@ -128,6 +128,10 @@ void TextureStreamer::update(size_t byteBudget, int maxUploads) {
         tex->width = d.img.width;
         tex->height = d.img.height;
         tex->hasAlpha = d.img.hasAlpha;
+        tex->opaque[0] = d.img.opaqueU0;
+        tex->opaque[1] = d.img.opaqueV0;
+        tex->opaque[2] = d.img.opaqueU1;
+        tex->opaque[3] = d.img.opaqueV1;
         tex->bytes = d.img.bytes() * 4 / 3;  // + mip chain
         tex->key = d.key;
         gResidentBytes += tex->bytes;

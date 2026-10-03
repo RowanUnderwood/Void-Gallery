@@ -106,6 +106,7 @@
             tunnelRadius: 85.0,
             imageSize: 60.0,       
             totalImages: 20,
+            floatingCollisions: 'makeway', // floating: 'off' | 'makeway' ('physics' = native viewer only, acts as makeway here)
             tunnelRows: 5,        
             wobbleStrength: 0.5,
             wobbleSpeed: 0.5,
@@ -158,7 +159,7 @@
             floating: {
                 stereoEyeSep: 0.5, stereoFOVBoost: 30,
                 cameraSpeed: 1.0, fogDensity: 0.0035, tunnelRadius: 85.0, imageSize: 60.0,
-                tunnelRows: 5, totalImages: 20, rotationSpeed: 0.1, noRotation: false,
+                tunnelRows: 5, totalImages: 20, rotationSpeed: 0.1, noRotation: false, floatingCollisions: 'makeway',
                 tunnelRotation: 0, lightCount: 15, ambientIntensity: 0.5,
                 gridCols: 6, gridRows: 4, gridSpacing: 400, pathRandomness: 0.3, gridEdgeBuffer: 2,
                 lightSpeed: 1.0, lightIntensity: 1500, lightColorMode: 'white', maxUploadsPerFrame: 2,
@@ -207,7 +208,7 @@
             'tunnelRotation', 'lightCount', 'ambientIntensity',
             'gridCols', 'gridRows', 'gridSpacing', 'pathRandomness', 'gridEdgeBuffer',
             'lightSpeed', 'lightIntensity', 'lightColorMode', 'maxUploadsPerFrame',
-            'stereoEyeSep', 'stereoFOVBoost', 'anisotropyLevel',
+            'stereoEyeSep', 'stereoFOVBoost', 'anisotropyLevel', 'floatingCollisions',
             'showMazeMap', 'mazeComplexity', 'mazeWalkingSpeed', 'mazeTextureTiling', 'mazeImageCount', 'mazeSpotlightAngle', 'mazeSpotlightHeight', 'mazeShadowRes',
             'navStyle', 'mazeWallTexture', 'mazeFloorTexture', 'mazeCeilingTexture'
         ];
@@ -478,7 +479,7 @@
                     tex.anisotropy = config.anisotropyLevel;
 
                     const ratio = image.width / image.height;
-                    this.textureBuffer.push({ texture: tex, ratio: ratio, pendingUpload: true });
+                    this.textureBuffer.push({ texture: tex, ratio: ratio, bounds: opaqueBounds(image), pendingUpload: true });
                     if (this.onReadyCallback) {
                         showLoading("Loading...", `${this.textureBuffer.length} / ${this.preloadTarget}`);
                         if (this.textureBuffer.length >= this.preloadTarget || 
@@ -577,6 +578,91 @@
         }
 
         const textureManager = new TextureManager();
+
+        // Bounds of an image's visible pixels (alpha >= 32) as fractions of the image, v up like UVs.
+        // Measured on a 64x64 downsample; cut-out images collide on their shape's box, not the canvas.
+        const boundsCanvas = document.createElement('canvas');
+        boundsCanvas.width = boundsCanvas.height = 64;
+        const boundsCtx = boundsCanvas.getContext('2d', { willReadFrequently: true });
+        function opaqueBounds(image) {
+            try {
+                boundsCtx.clearRect(0, 0, 64, 64);
+                boundsCtx.drawImage(image, 0, 0, 64, 64);
+                const d = boundsCtx.getImageData(0, 0, 64, 64).data;
+                let x0 = 64, y0 = 64, x1 = -1, y1 = -1;
+                for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) {
+                    if (d[(y * 64 + x) * 4 + 3] < 32) continue;
+                    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+                }
+                if (x1 < 0) return { u0: 0, v0: 0, u1: 1, v1: 1 };
+                return { u0: x0 / 64, u1: (x1 + 1) / 64, v0: 1 - (y1 + 1) / 64, v1: 1 - y0 / 64 };
+            } catch (e) {
+                return { u0: 0, v0: 0, u1: 1, v1: 1 };
+            }
+        }
+
+        // ---- Floating mode "make way" (same algorithm as the native viewer's MakeWay.cpp) ----
+        // Cards fly toward the camera at different speeds, so faster ones catch slower ones. When two
+        // cards overlap on screen and one is closing in, they slide apart sideways; if they still meet
+        // they bump gently (momentum conserved) and are held a small gap apart, so they never pass
+        // through each other (that was the visible "pop" when their draw order flipped).
+        const MAKEWAY = { gap: 2, lookahead: 1.5, push: 60, padding: 4, restitution: 0.2, speedRelax: 0.6, lateralDamping: 0.8 };
+        function stepMakeWay(cards, dt, radius) {
+            const p = MAKEWAY;
+            const relax = Math.min(1, p.speedRelax * dt), damp = Math.exp(-p.lateralDamping * dt);
+            let maxV = 0, minV = Infinity;
+            for (const c of cards) {
+                const pos = c.mesh.position, v = c.vel;
+                v.z += (c.cruise - v.z) * relax;
+                v.x *= damp; v.y *= damp;
+                const r = Math.hypot(pos.x, pos.y);
+                if (r > 1e-3) {
+                    let spring = 0;
+                    if (r > radius * 1.1) spring = -(r - radius * 1.1);
+                    else if (r < radius * 0.5) spring = radius * 0.5 - r;
+                    v.x += pos.x / r * spring * 2 * dt; v.y += pos.y / r * spring * 2 * dt;
+                }
+                maxV = Math.max(maxV, v.z); minV = Math.min(minV, v.z);
+            }
+            const order = cards.slice().sort((a, b) => a.mesh.position.z - b.mesh.position.z);
+            const windowZ = Math.max(0, maxV - minV) * p.lookahead + p.gap + 1;
+            for (let i = 0; i < order.length; i++) {
+                const rear = order[i], rp = rear.mesh.position;
+                for (let j = i + 1; j < order.length; j++) {
+                    const front = order[j], fp = front.mesh.position;  // larger z = closer to the camera
+                    const dz = fp.z - rp.z;
+                    if (dz > windowZ) break;
+                    const dx = (fp.x + front.offset.x) - (rp.x + rear.offset.x);
+                    const dy = (fp.y + front.offset.y) - (rp.y + rear.offset.y);
+                    const ox = rear.half.x + front.half.x + p.padding - Math.abs(dx);
+                    const oy = rear.half.y + front.half.y + p.padding - Math.abs(dy);
+                    if (ox <= 0 || oy <= 0) continue;
+                    const closing = rear.vel.z - front.vel.z;
+                    if (closing > 0 || dz < p.gap) {
+                        const t = closing > 1e-3 ? Math.max(0, dz - p.gap) / closing : 0;
+                        const urgency = Math.min(1, Math.max(0, 1 - t / p.lookahead));
+                        if (urgency > 0) {
+                            let ax = 0, ay = 0;
+                            if (ox < oy) ax = dx >= 0 ? 1 : -1; else ay = dy >= 0 ? 1 : -1;
+                            if (dx === 0 && dy === 0) { ax = 1; ay = 0; }
+                            const a = p.push * urgency * dt;
+                            front.vel.x += ax * a; front.vel.y += ay * a;
+                            rear.vel.x -= ax * a; rear.vel.y -= ay * a;
+                        }
+                    }
+                    if (dz < p.gap) {
+                        if (closing > 0) {
+                            const avg = 0.5 * (rear.vel.z + front.vel.z);
+                            rear.vel.z = avg - 0.5 * p.restitution * closing;
+                            front.vel.z = avg + 0.5 * p.restitution * closing;
+                        }
+                        const fix = 0.5 * (p.gap - dz);
+                        rp.z -= fix; fp.z += fix;
+                    }
+                }
+            }
+            for (const c of cards) c.mesh.position.addScaledVector(c.vel, dt);
+        }
 
         // =============================================
         // MAZE MODE CLASSES
@@ -976,7 +1062,7 @@
                 if (task.parent) task.parent.add(mesh);
                 else scene.add(mesh);
                 
-                if (task.onComplete) task.onComplete(mesh);
+                if (task.onComplete) task.onComplete(mesh, textureData);
             }
         }
 
@@ -1083,9 +1169,19 @@
         }
 
         function spawnFloatingImage(randomZ = false) {
-            const angle = Math.random() * Math.PI * 2;
-            const r = (Math.random() * 0.5 + 0.5) * config.tunnelRadius;
-            const z = randomZ ? -Math.random() * 1000 : -1000;
+            const avoid = config.floatingCollisions !== 'off';
+            const size = config.imageSize;
+            let angle, r, z;
+            for (let attempt = 0; attempt < 12; attempt++) {  // with collisions on, don't spawn on top of a card
+                angle = Math.random() * Math.PI * 2;
+                r = (Math.random() * 0.5 + 0.5) * config.tunnelRadius;
+                z = randomZ ? -Math.random() * 1000 : -1000 - (avoid ? Math.random() * 150 : 0);
+                if (!avoid) break;
+                const x = Math.cos(angle) * r, y = Math.sin(angle) * r;
+                const clash = (px, py, pz) => Math.abs(pz - z) < size * 0.5 && Math.abs(px - x) < size && Math.abs(py - y) < size;
+                if (!imageCards.some(c => clash(c.mesh.position.x, c.mesh.position.y, c.mesh.position.z)) &&
+                    !spawnQueue.some(t => t.type === 'floating' && clash(t.x, t.y, t.z))) break;
+            }
             const rot = new THREE.Euler();
             if (!config.noRotation) rot.set(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI);
             else rot.set(0,0,0);
@@ -1097,11 +1193,20 @@
                 w: config.imageSize, 
                 h: config.imageSize,
                 rotation: rot,
-                onComplete: (mesh) => {
+                onComplete: (mesh, textureData) => {
+                    const b = (textureData && textureData.bounds) || { u0: 0, v0: 0, u1: 1, v1: 1 };
+                    const w = mesh.scale.x, h = mesh.scale.y;
+                    const velocity = Math.random() * 0.5 + 1.0;
+                    const cruise = config.cameraSpeed * velocity * 10;
                     imageCards.push({
                         mesh: mesh,
                         rotationSpeed: new THREE.Vector3((Math.random()-0.5)*config.rotationSpeed, (Math.random()-0.5)*config.rotationSpeed, (Math.random()-0.5)*config.rotationSpeed),
-                        velocity: (Math.random() * 0.5 + 1.0)
+                        velocity: velocity,
+                        // make-way state: velocity (units/s), collision footprint of the visible pixels
+                        vel: new THREE.Vector3(0, 0, cruise),
+                        cruise: cruise,
+                        half: { x: 0.5 * (b.u1 - b.u0) * w, y: 0.5 * (b.v1 - b.v0) * h },
+                        offset: { x: ((b.u0 + b.u1) * 0.5 - 0.5) * w, y: ((b.v0 + b.v1) * 0.5 - 0.5) * h }
                     });
                 }
             });
@@ -1706,9 +1811,16 @@
                 camera.position.y += (targetY - camera.position.y) * 0.1;
                 camera.rotation.z = Math.sin(time * config.wobbleSpeed * 0.3) * 0.1 * config.wobbleStrength;
 
+                const collide = config.floatingCollisions !== 'off';
+                for (const card of imageCards) card.cruise = config.cameraSpeed * card.velocity * 10;
+                if (collide) {
+                    const step = Math.min(dt, 0.1);  // a backgrounded tab returns with a huge dt
+                    const n = Math.min(8, Math.max(1, Math.ceil(step / (1 / 120))));
+                    for (let k = 0; k < n; k++) stepMakeWay(imageCards, step / n, config.tunnelRadius);
+                }
                 for (let i = imageCards.length - 1; i >= 0; i--) {
                     const card = imageCards[i];
-                    card.mesh.position.z += config.cameraSpeed * card.velocity * dt * 10;
+                    if (!collide) card.mesh.position.z += card.cruise * dt;
                     if (!config.noRotation) {
                         card.mesh.rotation.x += card.rotationSpeed.x * dt;
                         card.mesh.rotation.y += card.rotationSpeed.y * dt;
@@ -1898,6 +2010,8 @@
             guiControllers.pathRandomness = folderGeom.add(config, 'pathRandomness', 0, 1).name('Path Randomness');
             guiControllers.gridEdgeBuffer = folderGeom.add(config, 'gridEdgeBuffer', 0, 5, 1).name('Edge Buffer');
 
+            guiControllers.floatingCollisions = folderGeom.add(config, 'floatingCollisions', ['off', 'makeway', 'physics'])
+                .name('Collisions');
             guiControllers.totalImages = folderGeom.add(config, 'totalImages', 10, 500, 1)
                 .name('Float Count').onFinishChange(() => textureManager.resetAndReload());
 
@@ -1989,6 +2103,7 @@
             if (!guiControllers.spinSpeed) return;
             guiControllers.spinSpeed.hide();
             guiControllers.noRotation.hide();
+            guiControllers.floatingCollisions.hide();
             guiControllers.tunnelRotation.hide();
             guiControllers.tunnelRows.hide();
             guiControllers.totalImages.hide();
@@ -2007,6 +2122,7 @@
             } else if (config.mode === 'floating') {
                 guiControllers.spinSpeed.show();
                 guiControllers.noRotation.show();
+                guiControllers.floatingCollisions.show();
                 guiControllers.totalImages.show();
                 guiControllers.tunnelRadius.show();
             } else if (config.mode === 'grid') {

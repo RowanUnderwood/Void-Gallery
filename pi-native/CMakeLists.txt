@@ -53,6 +53,20 @@ else()
   set(IMGUI_GL_DEFS IMGUI_IMPL_OPENGL_ES3)
 endif()
 
+# Jolt Physics (floating mode's optional rigid-body collisions). Portable x86 build: SSE4.2 only,
+# no AVX/AVX2/FMA, so the .scr runs on any x64 CPU; on ARM64 (Pi) these switches are ignored.
+foreach(opt TARGET_UNIT_TESTS TARGET_HELLO_WORLD TARGET_PERFORMANCE_TEST TARGET_SAMPLES TARGET_VIEWER
+            USE_AVX USE_AVX2 USE_AVX512 USE_LZCNT USE_TZCNT USE_F16C USE_FMADD INTERPROCEDURAL_OPTIMIZATION
+            DEBUG_RENDERER_IN_DEBUG_AND_RELEASE PROFILER_IN_DEBUG_AND_RELEASE GENERATE_DEBUG_SYMBOLS
+            OVERRIDE_CXX_FLAGS ENABLE_ALL_WARNINGS)
+  set(${opt} OFF CACHE BOOL "" FORCE)
+endforeach()
+set(CPP_EXCEPTIONS_ENABLED ON CACHE BOOL "" FORCE)  # our code (nlohmann/json) uses exceptions and RTTI
+set(CPP_RTTI_ENABLED ON CACHE BOOL "" FORCE)
+FetchContent_Declare(JoltPhysics GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git GIT_TAG v5.2.0
+                     GIT_SHALLOW TRUE SOURCE_SUBDIR Build)
+FetchContent_MakeAvailable(JoltPhysics)
+
 find_package(nlohmann_json 3.9 QUIET)
 if(NOT nlohmann_json_FOUND)
   FetchContent_Declare(nlohmann_json
@@ -111,6 +125,8 @@ add_library(itcore STATIC
   src/modes/CardBatch.cpp
   src/modes/MovingLights.cpp
   src/modes/FloatingMode.cpp
+  src/modes/MakeWay.cpp
+  src/modes/FloatingPhysics.cpp
   src/modes/TunnelMode.cpp
   src/modes/GridMode.cpp
   src/modes/MazeGen.cpp
@@ -124,7 +140,7 @@ add_library(itcore STATIC
   src/App.cpp)
 target_include_directories(itcore PUBLIC src)
 target_compile_definitions(itcore PUBLIC GLM_FORCE_RADIANS GLM_ENABLE_EXPERIMENTAL)
-target_link_libraries(itcore PUBLIC imgui stb glm::glm nlohmann_json::nlohmann_json it_platform)
+target_link_libraries(itcore PUBLIC imgui stb glm::glm nlohmann_json::nlohmann_json Jolt it_platform)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(itcore PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
