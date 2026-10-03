@@ -338,11 +338,12 @@
                              ((platform.includes('arm') || platform.includes('aarch64')) && platform.includes('linux') && !ua.includes('android'));
                 
                 const configFilename = isPi ? 'tunnel_config_potato.json' : 'tunnel_config.json';
-                
+
+                let serverData = null;
                 const response = await fetch(`./${configFilename}?t=${Date.now()}`);
                 if (response.ok) {
-                    const data = await response.json();
-                    applyConfiguration(data);
+                    serverData = await response.json();
+                    applyConfiguration(serverData);
                 }
 
                 // Check for local overrides safely
@@ -369,8 +370,8 @@
                     }
                 }
                 // availableTextures is server-managed inventory — always restore from server after any localStorage override
-                if (data.globals && data.globals.availableTextures) {
-                    config.availableTextures = data.globals.availableTextures;
+                if (serverData && serverData.globals && serverData.globals.availableTextures) {
+                    config.availableTextures = serverData.globals.availableTextures;
                 }
             } catch (e) {
                 console.log("Config load skipped or failed:", e);
@@ -865,15 +866,18 @@
         function processSpawnQueue() {
             if (spawnQueue.length === 0) return;
             
-            spawnQueue.sort((a, b) => {
-                const zA = a.parent ? a.parent.position.z + a.z : a.z;
-                const zB = b.parent ? b.parent.position.z + b.z : b.z;
-                return zB - zA;
-            });
+            // Higher key = spawn sooner. Maze paintings use camera distance; other modes use world z (camera looks down -Z).
+            const spawnPriority = (t) => {
+                if (t.type === 'maze_painting') return -camera.position.distanceToSquared(t.worldPos);
+                return t.parent ? t.parent.position.z + t.z : t.z;
+            };
+            spawnQueue.sort((a, b) => spawnPriority(b) - spawnPriority(a));
 
-            let textureData = textureManager.getTextureFromBuffer();
-            while (textureData && spawnQueue.length > 0) {
-                const task = spawnQueue.shift(); 
+            while (spawnQueue.length > 0) {
+                // Only pull a texture when a task is waiting for it, otherwise it is consumed and never used
+                const textureData = textureManager.getTextureFromBuffer();
+                if (!textureData) break;
+                const task = spawnQueue.shift();
                 
                 const material = new THREE.MeshLambertMaterial({ 
                     map: textureData.texture, side: THREE.DoubleSide, transparent: true,
@@ -953,6 +957,7 @@
                     
                     // Track the entire group for the spotlights to follow
                     mazePaintings.push({ mesh: group, normalDir: new THREE.Vector3(task.face.dc, 0, task.face.dr) });
+                    continue; // group already added; skip the generic mesh add below
                 } else {
                     let w = task.w;
                     let h = task.h;
@@ -969,8 +974,6 @@
                 else scene.add(mesh);
                 
                 if (task.onComplete) task.onComplete(mesh);
-
-                textureData = textureManager.getTextureFromBuffer();
             }
         }
 
@@ -1323,6 +1326,8 @@
 
             mazeSpotlights.forEach((sl) => {
                 sl.light.intensity = 0;
+                // Skip this light's shadow pass while idle. Toggling castShadow instead would force a shader recompile.
+                sl.light.shadow.autoUpdate = false;
                 if (sl.mesh) sl.mesh.visible = false;
             });
 
@@ -1351,7 +1356,8 @@
                 sl.target.position.copy(pp);
                 sl.target.updateMatrixWorld();
                 sl.light.intensity = config.lightIntensity;
-                
+                sl.light.shadow.autoUpdate = true;
+
                 // Update physical housing
                 if (sl.mesh) {
                     sl.mesh.position.copy(sl.light.position);
@@ -1392,7 +1398,8 @@
                 spawnQueue.push({
                     type: 'maze_painting',
                     face: face,
-                    z: face.row * MAZE_CELL_SIZE  // used by sort; prioritises nearest walls first
+                    // used by sort: paintings nearest the camera spawn first
+                    worldPos: new THREE.Vector3(face.col * MAZE_CELL_SIZE, 0, face.row * MAZE_CELL_SIZE)
                 });
             }
         }
