@@ -20,6 +20,19 @@
         }
         .custom-file-input { display: none; }
         
+        #maze-map {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.4);
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            z-index: 100;
+            display: none; /* Hidden by default */
+            pointer-events: none; /* Let clicks pass through to the 3D scene */
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        }
+        
         #stats-container { 
             position: absolute; top: 0; left: 0; z-index: 100;
             transform: scale(4); 
@@ -38,6 +51,7 @@
         }
         
         body.stereo-active #stats-container { display: none !important; }
+        body.stereo-active #maze-map { display: none !important; }
         
         body.stereo-active .instructions {
             left: 20px;
@@ -49,6 +63,7 @@
 
     <div id="canvas-container"></div>
     <div id="stats-container"></div>
+    <canvas id="maze-map" width="200" height="200"></canvas>
     <div id="loading-overlay">Loading...<div id="loading-subtext">Initializing...</div></div>
     <div class="instructions">Press 'H' to toggle Settings | Drag & Drop images</div>
     <input type="file" id="image-uploader" class="custom-file-input" multiple accept="image/*">
@@ -114,12 +129,27 @@
             serverExt: '.webp',
             serverStart: 1,
             serverEnd: 1075,
-            
+
+            // Maze Mode Settings
+            showMazeMap: true,
+            mazeComplexity: 21,
+            mazeWalkingSpeed: 1.0,
+            mazeTextureTiling: 2.0,
+            mazeImageCount: 55,
+            mazeSpotlightAngle: Math.PI / 5,
+            mazeSpotlightHeight: 6.0,
+            mazeShadowRes: 1024,
+            navStyle: 'win95',
+            mazeWallTexture: 'Bricks003_1K-JPG',
+            mazeFloorTexture: 'WoodFloor071_1K-PNG',
+            mazeCeilingTexture: 'OfficeCeiling001_1K-PNG',
+            availableTextures: ['Bricks003_1K-JPG', 'OfficeCeiling001_1K-PNG', 'Tiles084_1K-PNG', 'WoodFloor071_1K-PNG'],
+
             // Actions
             uploadImages: () => document.getElementById('image-uploader').click(),
             loadSequence: () => textureManager.loadNumberedSequence(),
             clearImages: () => textureManager.clearUserTextures(),
-            saveSettings: () => saveConfigToFile(),
+            saveSettings: () => saveConfigToLocal(),
             toggleFullscreen: () => toggleFullscreen()
         };
 
@@ -151,6 +181,22 @@
                 gridCols: 8, gridRows: 6, gridSpacing: 300, pathRandomness: 0.5, gridEdgeBuffer: 2,
                 lightSpeed: 2.0, lightIntensity: 1500, lightColorMode: 'white', maxUploadsPerFrame: 4,
                 anisotropyLevel: 4 // Higher default for grid
+            },
+            maze: {
+                stereoEyeSep: 0.5, stereoFOVBoost: 30,
+                cameraSpeed: 1.0, fogDensity: 0.012, tunnelRadius: 85.0, imageSize: 40.0,
+                tunnelRows: 5, totalImages: 20, rotationSpeed: 0.0, noRotation: true,
+                tunnelRotation: 0, lightCount: 0, ambientIntensity: 0.08,
+                gridCols: 6, gridRows: 4, gridSpacing: 400, pathRandomness: 0.3, gridEdgeBuffer: 2,
+                lightSpeed: 1.0, lightIntensity: 800, lightColorMode: 'white', maxUploadsPerFrame: 1,
+                anisotropyLevel: 4,
+                showMazeMap: true,
+                mazeComplexity: 21, mazeWalkingSpeed: 1.0, mazeTextureTiling: 2.0,
+                navStyle: 'win95',
+                mazeWallTexture: 'Bricks003_1K-JPG',
+                mazeFloorTexture: 'WoodFloor071_1K-PNG',
+                mazeCeilingTexture: 'OfficeCeiling001_1K-PNG',
+                mazeShadowRes: 1024
             }
         };
 
@@ -161,7 +207,9 @@
             'tunnelRotation', 'lightCount', 'ambientIntensity',
             'gridCols', 'gridRows', 'gridSpacing', 'pathRandomness', 'gridEdgeBuffer',
             'lightSpeed', 'lightIntensity', 'lightColorMode', 'maxUploadsPerFrame',
-            'stereoEyeSep', 'stereoFOVBoost', 'anisotropyLevel'
+            'stereoEyeSep', 'stereoFOVBoost', 'anisotropyLevel',
+            'showMazeMap', 'mazeComplexity', 'mazeWalkingSpeed', 'mazeTextureTiling', 'mazeImageCount', 'mazeSpotlightAngle', 'mazeSpotlightHeight', 'mazeShadowRes',
+            'navStyle', 'mazeWallTexture', 'mazeFloorTexture', 'mazeCeilingTexture'
         ];
 
         // --- Globals ---
@@ -181,6 +229,49 @@
         let gridLayers = []; 
         let currentGridTarget = new THREE.Vector3(0, 0, 0);
         let nextGridTargetIndex = { c: 0, r: 0 };
+        const raycaster = new THREE.Raycaster();
+        const rayDirection = new THREE.Vector3();
+
+        // --- Maze Mode Globals ---
+        const MAZE_CELL_SIZE = 20;
+        // Direction vectors: [dr, dc] (row delta, col delta)
+        const FACE_DIR_MAP = { N: [-1, 0], S: [1, 0], W: [0, -1], E: [0, 1] };
+        // Camera Y-rotation when facing each direction (camera looks along -Z by default)
+        const FACE_ROT_Y = { N: 0, S: Math.PI, W: Math.PI / 2, E: -Math.PI / 2 };
+        // Painting Y-rotation for each wall face (plane's +Z normal rotated to face into corridor)
+        const PAINTING_ROT_Y = { N: Math.PI, S: 0, W: -Math.PI / 2, E: Math.PI / 2 };
+        // Turn priority relative to current facing direction
+        const TURN_MAP = {
+            N: { straight: 'N', right: 'E', left: 'W', back: 'S' },
+            S: { straight: 'S', right: 'W', left: 'E', back: 'N' },
+            E: { straight: 'E', right: 'S', left: 'N', back: 'W' },
+            W: { straight: 'W', right: 'N', left: 'S', back: 'E' }
+        };
+        let mazeGrid = null;
+        let mazeChunks = [];         // { mesh: InstancedMesh }
+        let mazePaintings = [];      // { mesh: Mesh, normalDir: Vector3 }
+        let mazeSpotlights = [];     // { light: SpotLight, target: Object3D }
+        let materialManager = null;
+        let mazeFloor = null;
+        let mazeCeiling = null;
+        let mazeGen = null;
+        let mazeRegenerating = false;
+        let guiMazeFolder = null;
+        let mazeExit = null;
+        let mazeExitObject = null;
+        const mazeNav = {
+            currentCell: { row: 1, col: 1 },
+            targetCell:  { row: 1, col: 1 },
+            facing: 'S',
+            phase: 'idle',
+            progress: 1.0,
+            headBobTime: 0,
+            startPos: new THREE.Vector3(),
+            endPos: new THREE.Vector3(),
+            startQuat: new THREE.Quaternion(),
+            endQuat: new THREE.Quaternion()
+        };
+
         const loadingOverlay = document.getElementById('loading-overlay');
         const loadingSubtext = document.getElementById('loading-subtext');
 
@@ -206,7 +297,7 @@
             }
         }
 
-        function saveConfigToFile() {
+        function saveConfigToLocal() {
             stateKeys.forEach(key => {
                 modeStore[config.mode][key] = config[key];
             });
@@ -226,21 +317,60 @@
                 modes: modeStore
             };
 
-            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportData, null, 2));
-            const dlAnchorElem = document.createElement('a');
-            dlAnchorElem.setAttribute("href", dataStr);
-            dlAnchorElem.setAttribute("download", "tunnel_config.json");
-            document.body.appendChild(dlAnchorElem);
-            dlAnchorElem.click();
-            dlAnchorElem.remove();
+            try {
+                localStorage.setItem('imageTunnelConfig', JSON.stringify(exportData));
+                alert('Settings saved to browser!');
+            } catch (e) {
+                console.warn("Could not save to localStorage:", e);
+                alert('Could not save settings — browser storage may be disabled or full.');
+            }
         }
 
         async function loadConfigFromServer() {
             try {
-                const response = await fetch(`./tunnel_config.json?t=${Date.now()}`);
+                // Sniff the user agent and platform for Pi indicators
+                const ua = navigator.userAgent.toLowerCase();
+                const platform = navigator.platform.toLowerCase();
+                
+                // Catch Raspbian/Pi explicitly, or fallback to Linux ARM (excluding Android)
+                const isPi = ua.includes('raspbian') || 
+                             ua.includes('raspberry') || 
+                             ((platform.includes('arm') || platform.includes('aarch64')) && platform.includes('linux') && !ua.includes('android'));
+                
+                const configFilename = isPi ? 'tunnel_config_potato.json' : 'tunnel_config.json';
+                
+                const response = await fetch(`./${configFilename}?t=${Date.now()}`);
                 if (response.ok) {
                     const data = await response.json();
                     applyConfiguration(data);
+                }
+
+                // Check for local overrides safely
+                let localDataStr = null;
+                try {
+                    if (typeof window.localStorage !== 'undefined') {
+                        localDataStr = window.localStorage.getItem('imageTunnelConfig');
+                    }
+                } catch (e) {
+                    console.warn("Local storage is disabled in this environment. Falling back to server config.", e);
+                }
+
+                if (localDataStr) {
+                    try {
+                        const localData = JSON.parse(localDataStr);
+                        if (localData.version === 2.2) {
+                            applyConfiguration(localData);
+                            console.log("Applied user settings from localStorage.");
+                        } else {
+                            console.warn("Local settings are out of date. Reverting to server defaults.");
+                        }
+                    } catch (e) {
+                        console.warn("localStorage data was corrupt, ignoring:", e);
+                    }
+                }
+                // availableTextures is server-managed inventory — always restore from server after any localStorage override
+                if (data.globals && data.globals.availableTextures) {
+                    config.availableTextures = data.globals.availableTextures;
                 }
             } catch (e) {
                 console.log("Config load skipped or failed:", e);
@@ -400,7 +530,8 @@
                 if (config.mode === 'tunnel') needed = config.tunnelRows * 10;
                 const cols = config.gridCols || 6;
                 const rows = config.gridRows || 4;
-                if (config.mode === 'grid') needed = (cols * rows) * 2; 
+                if (config.mode === 'grid') needed = (cols * rows) * 2;
+                if (config.mode === 'maze') needed = (config.mazeImageCount || 55) + 5;
 
                 this.maxBufferSize = Math.max(needed + 10, 75); 
                 this.preloadTarget = Math.min(needed, 10); 
@@ -446,6 +577,131 @@
 
         const textureManager = new TextureManager();
 
+        // =============================================
+        // MAZE MODE CLASSES
+        // =============================================
+
+        class MazeGenerator {
+            generate(size) {
+                // size must be odd; recursive backtracker DFS
+                const s = (size % 2 === 0) ? size + 1 : size;
+                const grid = Array.from({ length: s }, () => new Array(s).fill(1));
+                grid[1][1] = 0;
+                const stack = [[1, 1]];
+                while (stack.length > 0) {
+                    const [r, c] = stack[stack.length - 1];
+                    const nbrs = this._unvisited(grid, r, c, s);
+                    if (nbrs.length > 0) {
+                        const [nr, nc] = nbrs[Math.floor(Math.random() * nbrs.length)];
+                        grid[(r + nr) >> 1][(c + nc) >> 1] = 0; // carve passage
+                        grid[nr][nc] = 0;
+                        stack.push([nr, nc]);
+                    } else {
+                        stack.pop();
+                    }
+                }
+                return grid;
+            }
+            _unvisited(grid, r, c, s) {
+                return [[r-2,c],[r+2,c],[r,c-2],[r,c+2]]
+                    .filter(([nr,nc]) => nr>0 && nr<s-1 && nc>0 && nc<s-1 && grid[nr][nc]===1);
+            }
+            // Returns wall cells that border an open corridor — these are where paintings hang
+            getWallFaces(grid) {
+                const faces = [], rows = grid.length, cols = grid[0].length;
+                const dirs = [
+                    { face:'N', dr:-1, dc: 0 }, { face:'S', dr: 1, dc: 0 },
+                    { face:'W', dr: 0, dc:-1 }, { face:'E', dr: 0, dc: 1 }
+                ];
+                for (let r = 0; r < rows; r++) {
+                    for (let c = 0; c < cols; c++) {
+                        if (grid[r][c] === 1) {
+                            dirs.forEach(({ face, dr, dc }) => {
+                                const nr = r + dr, nc = c + dc;
+                                if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && grid[nr][nc] === 0) {
+                                    faces.push({ row: r, col: c, face, dr, dc });
+                                }
+                            });
+                        }
+                    }
+                }
+                return faces;
+            }        }
+
+        class MaterialManager {
+            constructor() {
+                this.materials = {};  // 'wall'|'floor'|'ceiling' → THREE.MeshStandardMaterial
+                this.textures  = {};  // 'wall'|'floor'|'ceiling' → { color, normal, roughness }
+            }
+            _ext(folderName) {
+                return folderName.toLowerCase().endsWith('-jpg') ? 'jpg' : 'png';
+            }
+            async load(surface, folderName) {
+                const ext  = this._ext(folderName);
+                const base = `./textures/${folderName}/${folderName}`;
+                const loader = new THREE.TextureLoader();
+                const loadTex = suffix => new Promise(resolve => {
+                    loader.load(`${base}_${suffix}.${ext}`, tex => {
+                        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+                        resolve(tex);
+                    }, undefined, () => resolve(null));
+                });
+                // Dispose old textures for this surface
+                if (this.textures[surface]) {
+                    Object.values(this.textures[surface]).forEach(t => { if (t) t.dispose(); });
+                }
+                const [colorTex, normalTex, roughnessTex] = await Promise.all([
+                    loadTex('Color'), loadTex('NormalGL'), loadTex('Roughness')
+                ]);
+                // Per-surface tiling: floor/ceiling span 10 000 units, walls span MAZE_CELL_SIZE
+                let rX, rY;
+                if (surface === 'floor' || surface === 'ceiling') {
+                    rX = rY = 2000 / (MAZE_CELL_SIZE / config.mazeTextureTiling);
+                } else {
+                    rX = config.mazeTextureTiling;
+                    rY = rX * 1.5; // walls are 1.5× taller than wide
+                }
+                [colorTex, normalTex, roughnessTex].forEach(tex => {
+                    if (tex) tex.repeat.set(rX, rY);
+                });
+                this.textures[surface] = { color: colorTex, normal: normalTex, roughness: roughnessTex };
+                if (!this.materials[surface]) {
+                    this.materials[surface] = new THREE.MeshStandardMaterial({ roughness: 1.0, metalness: 0.0 });
+                }
+                const mat = this.materials[surface];
+                mat.map = colorTex;
+                mat.normalMap = normalTex;
+                mat.roughnessMap = roughnessTex;
+                mat.needsUpdate = true;
+                return mat;
+            }
+            updateTiling() {
+                const surfaces = ['wall', 'floor', 'ceiling'];
+                surfaces.forEach(surface => {
+                    const group = this.textures[surface];
+                    if (!group) return;
+                    let rX, rY;
+                    if (surface === 'floor' || surface === 'ceiling') {
+                        rX = rY = 2000 / (MAZE_CELL_SIZE / config.mazeTextureTiling);
+                    } else {
+                        rX = config.mazeTextureTiling;
+                        rY = rX * 1.5;
+                    }
+                    Object.values(group).forEach(tex => {
+                        if (tex) { tex.repeat.set(rX, rY); tex.needsUpdate = true; }
+                    });
+                });
+            }
+            dispose() {
+                Object.values(this.textures).forEach(group => {
+                    if (group) Object.values(group).forEach(t => { if (t) t.dispose(); });
+                });
+                this.textures = {};
+                Object.values(this.materials).forEach(m => { if (m) m.dispose(); });
+                this.materials = {};
+            }
+        }
+
         async function init() {
             await loadConfigFromServer();
 
@@ -457,6 +713,8 @@
             renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); 
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
             document.getElementById('canvas-container').appendChild(renderer.domElement);
 
             stereoEffect = new StereoEffect(renderer);
@@ -521,6 +779,44 @@
         function rebuildScene() {
             spawnQueue = [];
 
+            // --- Maze Mode Cleanup ---
+            mazeChunks.forEach(chunk => { scene.remove(chunk.mesh); chunk.mesh.geometry.dispose(); });
+            mazeChunks = [];
+            mazePaintings.forEach(p => { 
+                scene.remove(p.mesh); 
+                p.mesh.children.forEach(child => {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) safeDisposeMaterial(child.material);
+                });
+            });
+            mazePaintings = [];
+            mazeSpotlights.forEach(s => { 
+                scene.remove(s.light); scene.remove(s.target); s.light.dispose(); 
+                if (s.mesh) {
+                    scene.remove(s.mesh);
+                    s.mesh.children.forEach(c => {
+                        if (c.geometry) c.geometry.dispose();
+                        if (c.material) safeDisposeMaterial(c.material);
+                    });
+                }
+            });
+            mazeSpotlights = [];
+            if (materialManager) { materialManager.dispose(); materialManager = null; }
+            if (mazeFloor)   { scene.remove(mazeFloor);   mazeFloor.geometry.dispose();   mazeFloor   = null; }
+            if (mazeCeiling) { scene.remove(mazeCeiling); mazeCeiling.geometry.dispose(); mazeCeiling = null; }
+            if (mazeExitObject) {
+                scene.remove(mazeExitObject.group);
+                mazeExitObject.mesh.geometry.dispose();
+                safeDisposeMaterial(mazeExitObject.mesh.material);
+                mazeExitObject.mesh.children[0].geometry.dispose();
+                safeDisposeMaterial(mazeExitObject.mesh.children[0].material);
+                mazeExitObject.light.dispose();
+                mazeExitObject = null;
+            }
+            mazeExit = null;
+            mazeRegenerating = false;
+            mazeNav.phase = 'idle';
+
             imageCards.forEach(c => {
                 scene.remove(c.mesh);
                 if (c.mesh.geometry && c.mesh.geometry !== sharedPlaneGeometry && c.mesh.geometry !== tunnelGeometry) {
@@ -554,6 +850,9 @@
                 setupTunnelGrid();
             } else if (config.mode === 'grid') {
                 setupGridSystem();
+            } else if (config.mode === 'maze') {
+                showLoading('Building Maze...', 'Generating layout...');
+                setupMazeMode().then(() => hideLoading());
             }
             updateGUIVisibility();
         }
@@ -583,13 +882,79 @@
 
                 let mesh;
                 if (task.type === 'tunnel') {
-                    const geo = tunnelGeometry.clone(); 
+                    const geo = tunnelGeometry.clone();
                     mesh = new THREE.Mesh(geo, material);
                     mesh.position.set(task.x, task.y, task.z);
                     mesh.rotation.z = task.rotationZ;
                     updateTileUVs(mesh, textureData.ratio, task.colIndex);
+                } else if (task.type === 'maze_painting') {
+                    // --- REFINED SOLID PICTURE FRAME ASSEMBLY ---
+                    const pW = MAZE_CELL_SIZE * 0.58;
+                    let pH = pW / textureData.ratio; 
+
+                    // Group sits exactly on the wall surface
+                    const deepOffset = MAZE_CELL_SIZE * 0.5; 
+                    const paintingY = MAZE_CELL_SIZE * 1.5 * 0.5;
+
+                    const group = new THREE.Group();
+
+                    // 1. THE THICK, SOLID FRAME (The physical gasket)
+                    const frameWidth = 1.1;  // Slightly wider than the image
+                    const frameDepth = 0.8;  // Very thick box
+                    const frameGeo = new THREE.BoxGeometry(pW + frameWidth, pH + frameWidth, frameDepth);
+                    const frameMat = new THREE.MeshStandardMaterial({ 
+                        color: 0x1a110a, // Dark matte finish
+                        roughness: 0.9, 
+                        metalness: 0.1 
+                    });
+                    const frameMesh = new THREE.Mesh(frameGeo, frameMat);
+                    frameMesh.castShadow = true;
+                    frameMesh.receiveShadow = true;
+                    frameMesh.position.z = 0; // Half in the wall, half out
+                    group.add(frameMesh);
+                    
+                    // 1b. FAKE AO GASKET — unlit black border flush with wall to hide light bleed
+                    const aoMargin = .1; // how far it extends past the frame edge
+                    const aoGeo = new THREE.PlaneGeometry(pW + frameWidth + aoMargin * 2, pH + frameWidth + aoMargin * 2);
+                    const aoMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+                    const aoMesh = new THREE.Mesh(aoGeo, aoMat);
+                    aoMesh.position.z = 0.01; // just in front of wall surface (z=0 is the wall)
+                    aoMesh.castShadow = false;
+                    aoMesh.receiveShadow = false;
+                    group.add(aoMesh);
+                    
+                    // 2. THE THIN, DARK BACKGROUND PLANE (Z-Fighting blocker)
+                    const bgPlaneGeo = new THREE.PlaneGeometry(pW + frameWidth * 0.8, pH + frameWidth * 0.8);
+                    const bgPlaneMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+                    const bgPlaneMesh = new THREE.Mesh(bgPlaneGeo, bgPlaneMat);
+                    bgPlaneMesh.position.z = frameDepth / 2 - 0.05; // Slightly recessed inside the front of the frame
+                    group.add(bgPlaneMesh);
+
+                    // 3. THE IMAGE CANVAS
+                    const imgGeo = new THREE.PlaneGeometry(pW, pH);
+                    const imgMesh = new THREE.Mesh(imgGeo, material);
+                    imgMesh.position.z = frameDepth / 2 + 0.01; // Slightly in front of frame/background plane
+                    imgMesh.castShadow = false; 
+                    imgMesh.receiveShadow = true; // MUST receive shadows so it doesn't glow in the dark
+                    group.add(imgMesh);
+
+                    // --- APPLY WORLD POSITION AND ROTATION ---
+                    const wallX = task.face.col * MAZE_CELL_SIZE;
+                    const wallZ = task.face.row * MAZE_CELL_SIZE;
+                    group.position.set(
+                        wallX + task.face.dc * deepOffset, 
+                        paintingY, 
+                        wallZ + task.face.dr * deepOffset
+                    );
+                    group.rotation.y = PAINTING_ROT_Y[task.face.face];
+                    
+                    if (task.parent) task.parent.add(group);
+                    else scene.add(group);
+                    
+                    // Track the entire group for the spotlights to follow
+                    mazePaintings.push({ mesh: group, normalDir: new THREE.Vector3(task.face.dc, 0, task.face.dr) });
                 } else {
-                    let w = task.w; 
+                    let w = task.w;
                     let h = task.h;
                     if (textureData.ratio > 1) h = w / textureData.ratio;
                     else w = h * textureData.ratio;
@@ -791,6 +1156,427 @@
             });
         }
 
+        // =============================================
+        // MAZE MODE FUNCTIONS
+        // =============================================
+
+        function cellToWorld(row, col) {
+            return new THREE.Vector3(col * MAZE_CELL_SIZE, MAZE_CELL_SIZE * 0.6, row * MAZE_CELL_SIZE);
+        }
+
+        function canMazeMove(row, col, dir) {
+            if (!mazeGrid) return false;
+            const [dr, dc] = FACE_DIR_MAP[dir];
+            const size = mazeGrid.length, cols = mazeGrid[0].length;
+            const pr = row + dr, pc = col + dc;
+            const nr = row + dr * 2, nc = col + dc * 2;
+            if (pr < 0 || pr >= size || pc < 0 || pc >= cols) return false;
+            if (nr < 0 || nr >= size || nc < 0 || nc >= cols) return false;
+            return mazeGrid[pr][pc] === 0 && mazeGrid[nr][nc] === 0;
+        }
+
+        function advanceMazeNav() {
+            mazeNav.currentCell = { row: mazeNav.targetCell.row, col: mazeNav.targetCell.col };
+            const { row, col } = mazeNav.currentCell;
+
+            // Check if we reached the exit
+            if (mazeExit && row === mazeExit.row && col === mazeExit.col) {
+                if (!mazeRegenerating) { mazeRegenerating = true; regenerateMaze(); }
+                return;
+            }
+
+            const turns = TURN_MAP[mazeNav.facing];
+            const options = [turns.straight, turns.right, turns.left];
+            
+            // Randomly shuffle forward-moving options so we explore organically
+            for (let i = options.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [options[i], options[j]] = [options[j], options[i]];
+            }
+            // Add 'back' at the very end — ONLY used if it's a dead end
+            options.push(turns.back);
+
+            let chosenDir = null;
+            for (const dir of options) {
+                if (canMazeMove(row, col, dir)) { chosenDir = dir; break; }
+            }
+            if (!chosenDir) { mazeRegenerating = true; regenerateMaze(); return; }
+
+            if (chosenDir !== mazeNav.facing) {
+                // Turn needed before moving
+                mazeNav.startQuat.copy(camera.quaternion);
+                mazeNav.endQuat.setFromEuler(new THREE.Euler(0, FACE_ROT_Y[chosenDir], 0, 'YXZ'));
+                mazeNav.facing = chosenDir;
+                mazeNav.phase = 'turning';
+                mazeNav.progress = 0;
+            } else {
+                startMazeMoving();
+            }
+        }
+
+        function startMazeMoving() {
+            const { row, col } = mazeNav.currentCell;
+            const [dr, dc] = FACE_DIR_MAP[mazeNav.facing];
+            const nr = row + dr * 2, nc = col + dc * 2;
+            mazeNav.targetCell = { row: nr, col: nc };
+            mazeNav.startPos.copy(camera.position);
+            mazeNav.endPos.copy(cellToWorld(nr, nc));
+            mazeNav.startPos.y = MAZE_CELL_SIZE * 0.6;
+            mazeNav.phase = 'moving';
+            mazeNav.progress = 0;
+            mazeNav.headBobTime = 0;
+        }
+
+        function updateMazeCamera(dt) {
+            const STEP_DURATION = 1.2 / Math.max(0.1, config.mazeWalkingSpeed);
+            // Modern: turn overlaps with forward drift; Win95: crisp stop-and-turn
+            const TURN_DURATION = config.navStyle === 'modern' ? STEP_DURATION * 0.8 : 0.25;
+
+            if (mazeNav.phase === 'turning') {
+                mazeNav.progress = Math.min(mazeNav.progress + dt / TURN_DURATION, 1.0);
+                const ease = mazeNav.progress * mazeNav.progress * (3 - 2 * mazeNav.progress);
+                camera.quaternion.slerpQuaternions(mazeNav.startQuat, mazeNav.endQuat, ease);
+                // Modern: push slightly forward into the curve during the turn
+                if (config.navStyle === 'modern' && mazeNav.progress > 0.3) {
+                    camera.translateZ(-config.mazeWalkingSpeed * dt * 8);
+                }
+                if (mazeNav.progress >= 1.0) startMazeMoving();
+            }
+
+            if (mazeNav.phase === 'moving') {
+                mazeNav.progress = Math.min(mazeNav.progress + dt / STEP_DURATION, 1.0);
+                mazeNav.headBobTime += dt * Math.PI * 2;
+                const ease = mazeNav.progress * mazeNav.progress * (3 - 2 * mazeNav.progress);
+                camera.position.lerpVectors(mazeNav.startPos, mazeNav.endPos, ease);
+                if (mazeNav.progress >= 1.0) advanceMazeNav();
+            }
+
+            // Apply head height (bob for win95, flat for modern)
+            camera.position.y = MAZE_CELL_SIZE * 0.6 + (config.navStyle === 'win95' ? Math.sin(mazeNav.headBobTime) * 0.35 : 0);
+
+            // Modern mouse-look: absolute offset from base facing — no per-frame accumulation
+            if (config.navStyle === 'modern' && mazeNav.phase === 'moving') {
+                const baseQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, FACE_ROT_Y[mazeNav.facing], 0, 'YXZ'));
+                const yawQ   = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -mouse.x * 0.4);
+                const pitchQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0),  mouse.y * 0.2);
+                camera.quaternion.copy(baseQuat).multiply(yawQ).multiply(pitchQ);
+            }
+        }
+
+        function setupMazeSpotlights() {
+            mazeSpotlights.forEach(s => { 
+                scene.remove(s.light); scene.remove(s.target); s.light.dispose(); 
+                if (s.mesh) {
+                    scene.remove(s.mesh);
+                    s.mesh.children.forEach(c => {
+                        if (c.geometry) c.geometry.dispose();
+                        if (c.material) safeDisposeMaterial(c.material);
+                    });
+                }
+            });
+            mazeSpotlights = [];
+            const POOL = 6;
+            for (let i = 0; i < POOL; i++) {
+                const color = config.lightColorMode === 'random' ? new THREE.Color().setHSL(Math.random(), 1, 0.5) : new THREE.Color(0xfff5e0);
+                const light = new THREE.SpotLight(color, 0, 70, config.mazeSpotlightAngle, 0.4);
+                const target = new THREE.Object3D();
+                light.target = target;
+                
+                light.castShadow = true;
+                light.shadow.mapSize.width = config.mazeShadowRes;
+                light.shadow.mapSize.height = config.mazeShadowRes;
+                light.shadow.camera.near = 1;
+                light.shadow.camera.far = 70;
+                light.shadow.bias = -0.0001;
+                light.shadow.normalBias = 0.01;
+                
+                const mesh = new THREE.Group();
+                const housingGeo = new THREE.CylinderGeometry(0.8, 0.8, 2, 16);
+                const housingMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.8, roughness: 0.2 });
+                const housing = new THREE.Mesh(housingGeo, housingMat);
+                housing.rotation.x = Math.PI / 2;
+                
+                const lensGeo = new THREE.CylinderGeometry(0.7, 0.7, 0.2, 16);
+                const lensMat = new THREE.MeshBasicMaterial({ color: color });
+                const lens = new THREE.Mesh(lensGeo, lensMat);
+                lens.rotation.x = Math.PI / 2;
+                lens.position.z = 1.0;
+                
+                mesh.add(housing);
+                mesh.add(lens);
+                
+                scene.add(mesh);
+                scene.add(light);
+                scene.add(target);
+                mazeSpotlights.push({ light, target, mesh });
+            }
+        }
+
+        function updateSpotlightAssignments() {
+            if (mazePaintings.length === 0 || mazeSpotlights.length === 0) return;
+            const camPos = camera.position;
+            const sorted = mazePaintings
+                .map(p => ({ p, dist: camPos.distanceTo(p.mesh.position) }))
+                .sort((a, b) => a.dist - b.dist);
+
+            let activeLights = 0;
+
+            mazeSpotlights.forEach((sl) => {
+                sl.light.intensity = 0;
+                if (sl.mesh) sl.mesh.visible = false;
+            });
+
+            for (let i = 0; i < sorted.length; i++) {
+                if (activeLights >= mazeSpotlights.length) break;
+                if (sorted[i].dist > 120) continue;
+
+                const { p, dist } = sorted[i];
+                const pp = p.mesh.position;
+
+                // Raycast check: Ensure no wall is blocking the line of sight
+                rayDirection.subVectors(pp, camPos).normalize();
+                raycaster.set(camPos, rayDirection);
+                // Check against the InstancedMesh wall chunks
+                const intersects = raycaster.intersectObject(mazeChunks[0].mesh);
+
+                // If we hit a wall AND that wall is significantly closer than the painting, it's blocked.
+                if (intersects.length > 0 && intersects[0].distance < dist - 1.0) {
+                    continue; 
+                }
+
+                const sl = mazeSpotlights[activeLights];
+                
+                // Center the light closely in front of and slightly above the painting
+                sl.light.position.set(pp.x + p.normalDir.x * 2, pp.y + config.mazeSpotlightHeight, pp.z + p.normalDir.z * 2);
+                sl.target.position.copy(pp);
+                sl.target.updateMatrixWorld();
+                sl.light.intensity = config.lightIntensity;
+                
+                // Update physical housing
+                if (sl.mesh) {
+                    sl.mesh.position.copy(sl.light.position);
+                    sl.mesh.lookAt(sl.target.position);
+                    sl.mesh.visible = true;
+                }
+                
+                activeLights++;
+            }
+
+            // --- Raycast check for the Exit Portal ---
+            if (mazeExitObject) {
+                const exitPos = mazeExitObject.group.position.clone();
+                exitPos.y = MAZE_CELL_SIZE * 0.6; // Match camera height
+                const distToExit = camPos.distanceTo(exitPos);
+                
+                if (distToExit > 200) {
+                    mazeExitObject.group.visible = false;
+                } else {
+                    rayDirection.subVectors(exitPos, camPos).normalize();
+                    raycaster.set(camPos, rayDirection);
+                    const intersects = raycaster.intersectObject(mazeChunks[0].mesh);
+                    if (intersects.length > 0 && intersects[0].distance < distToExit - 1.0) {
+                        mazeExitObject.group.visible = false;
+                    } else {
+                        mazeExitObject.group.visible = true;
+                    }
+                }
+            }
+        }
+
+        function spawnMazePaintings() {
+            if (!mazeGrid) return;
+            const wallFaces = mazeGen.getWallFaces(mazeGrid);
+            const shuffled = [...wallFaces].sort(() => Math.random() - 0.5).slice(0, config.mazeImageCount || 55);
+            // Push into spawnQueue so textures arrive gradually without draining the buffer
+            for (const face of shuffled) {
+                spawnQueue.push({
+                    type: 'maze_painting',
+                    face: face,
+                    z: face.row * MAZE_CELL_SIZE  // used by sort; prioritises nearest walls first
+                });
+            }
+        }
+
+        async function buildMazeGeometry() {
+            const wallHeight = MAZE_CELL_SIZE * 1.5;
+            const wallPositions = [];
+            for (let r = 0; r < mazeGrid.length; r++) {
+                for (let c = 0; c < mazeGrid[0].length; c++) {
+                    if (mazeGrid[r][c] === 1) wallPositions.push([c * MAZE_CELL_SIZE, (wallHeight / 2) - 2, r * MAZE_CELL_SIZE]);
+                }
+            }
+
+            const wallGeo = new THREE.BoxGeometry(MAZE_CELL_SIZE, wallHeight + 4, MAZE_CELL_SIZE);
+            const wallMesh = new THREE.InstancedMesh(wallGeo, materialManager.materials.wall, wallPositions.length);
+            wallMesh.castShadow = true;
+            wallMesh.receiveShadow = true;
+            const matrix = new THREE.Matrix4();
+            wallPositions.forEach(([x, y, z], i) => { matrix.makeTranslation(x, y, z); wallMesh.setMatrixAt(i, matrix); });
+            wallMesh.instanceMatrix.needsUpdate = true;
+            scene.add(wallMesh);
+            mazeChunks.push({ mesh: wallMesh });
+
+            // Floor and ceiling planes, scaled down and centered to prevent texture jitter
+            const bounds = mazeGrid.length * MAZE_CELL_SIZE;
+            const floorGeo = new THREE.PlaneGeometry(2000, 2000);
+            mazeFloor = new THREE.Mesh(floorGeo, materialManager.materials.floor);
+            mazeFloor.rotation.x = -Math.PI / 2;
+            mazeFloor.position.set(bounds / 2, 0, bounds / 2);
+            mazeFloor.receiveShadow = true;
+            scene.add(mazeFloor);
+
+            const ceilGeo = new THREE.PlaneGeometry(2000, 2000);
+            mazeCeiling = new THREE.Mesh(ceilGeo, materialManager.materials.ceiling);
+            mazeCeiling.rotation.x = Math.PI / 2;
+            mazeCeiling.position.set(bounds / 2, wallHeight, bounds / 2);
+            mazeCeiling.receiveShadow = true;
+            scene.add(mazeCeiling);
+
+            setupMazeSpotlights();
+            spawnMazePaintings();
+
+            // Position camera at start cell (center of the maze)
+            const center = Math.floor(mazeGrid.length / 2);
+            const startIdx = center % 2 === 0 ? center + 1 : center;
+            const startPos = cellToWorld(startIdx, startIdx);
+
+            // Find the furthest open cell from the start to act as the exit
+            let maxDist = -1;
+            let furthestCell = { row: startIdx, col: startIdx };
+            
+            for (let r = 1; r < mazeGrid.length - 1; r += 2) {
+                for (let c = 1; c < mazeGrid[0].length - 1; c += 2) {
+                    if (mazeGrid[r][c] === 0) {
+                        const dist = Math.abs(r - startIdx) + Math.abs(c - startIdx);
+                        if (dist > maxDist) {
+                            maxDist = dist;
+                            furthestCell = { row: r, col: c };
+                        }
+                    }
+                }
+            }
+            mazeExit = furthestCell;
+
+            // Build the Exit Portal (Spinning Crystal + Light)
+            const exitGroup = new THREE.Group();
+            const exitGeo = new THREE.OctahedronGeometry(3);
+            const exitMat = new THREE.MeshStandardMaterial({ 
+                color: 0x00ffff, emissive: 0x00aaee, emissiveIntensity: 0.8, 
+                wireframe: true, transparent: true, opacity: 0.9 
+            });
+            const exitMesh = new THREE.Mesh(exitGeo, exitMat);
+            exitMesh.position.y = MAZE_CELL_SIZE * 0.6;
+            
+            const innerGeo = new THREE.OctahedronGeometry(1.5);
+            const innerMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+            const innerMesh = new THREE.Mesh(innerGeo, innerMat);
+            exitMesh.add(innerMesh);
+
+            const exitLight = new THREE.PointLight(0x00ffff, 2000, 150);
+            exitLight.position.y = MAZE_CELL_SIZE * 0.6;
+            exitLight.castShadow = true;
+            exitLight.shadow.mapSize.width = 512;
+            exitLight.shadow.mapSize.height = 512;
+            exitLight.shadow.bias = -0.001;
+            
+            exitGroup.add(exitMesh);
+            exitGroup.add(exitLight);
+            
+            const exitPos = cellToWorld(mazeExit.row, mazeExit.col);
+            exitGroup.position.set(exitPos.x, 0, exitPos.z);
+            scene.add(exitGroup);
+            
+            mazeExitObject = { group: exitGroup, mesh: exitMesh, light: exitLight };
+
+            camera.position.copy(startPos);
+            camera.quaternion.setFromEuler(new THREE.Euler(0, Math.PI, 0, 'YXZ')); // face south
+
+            // Initialize navigation — progress=1 triggers advanceMazeNav on first frame
+            mazeNav.currentCell = { row: startIdx, col: startIdx };
+            mazeNav.targetCell  = { row: startIdx, col: startIdx };
+            mazeNav.facing = 'S';
+            mazeNav.startPos.copy(startPos);
+            mazeNav.endPos.copy(startPos);
+            mazeNav.phase = 'moving';
+            mazeNav.progress = 1.0;
+        }
+
+        async function setupMazeMode() {
+            mazeGen = new MazeGenerator();
+            const size = (config.mazeComplexity % 2 === 0) ? config.mazeComplexity + 1 : config.mazeComplexity;
+            mazeGrid = mazeGen.generate(size);
+
+            // Load textures only on first call — reuse materialManager on regeneration
+            if (!materialManager) {
+                materialManager = new MaterialManager();
+                await Promise.all([
+                    materialManager.load('wall',    config.mazeWallTexture),
+                    materialManager.load('floor',   config.mazeFloorTexture),
+                    materialManager.load('ceiling', config.mazeCeilingTexture)
+                ]);
+            }
+            await buildMazeGeometry();
+        }
+
+        async function regenerateMaze() {
+            // Classic Win95 style 3D flip transition
+            const container = document.getElementById('canvas-container');
+            container.style.transition = 'transform 0.4s ease-in-out';
+            container.style.transform = 'rotateY(90deg)';
+            
+            await new Promise(resolve => setTimeout(resolve, 400));
+
+            // Dispose maze geometry — NOT MaterialManager (textures are reused)
+            mazeChunks.forEach(chunk => { scene.remove(chunk.mesh); chunk.mesh.geometry.dispose(); });
+            mazeChunks = [];
+            mazePaintings.forEach(p => { 
+                scene.remove(p.mesh); 
+                p.mesh.children.forEach(child => {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) safeDisposeMaterial(child.material);
+                });
+            });
+            mazePaintings = [];
+            // Clear any pending maze_painting tasks from the old maze
+            spawnQueue = spawnQueue.filter(t => t.type !== 'maze_painting');
+            mazeSpotlights.forEach(s => { 
+                scene.remove(s.light); scene.remove(s.target); s.light.dispose(); 
+                if (s.mesh) {
+                    scene.remove(s.mesh);
+                    s.mesh.children.forEach(c => {
+                        if (c.geometry) c.geometry.dispose();
+                        if (c.material) safeDisposeMaterial(c.material);
+                    });
+                }
+            });
+            mazeSpotlights = [];
+            if (mazeFloor)   { scene.remove(mazeFloor);   mazeFloor.geometry.dispose();   mazeFloor   = null; }
+            if (mazeCeiling) { scene.remove(mazeCeiling); mazeCeiling.geometry.dispose(); mazeCeiling = null; }
+            if (mazeExitObject) {
+                scene.remove(mazeExitObject.group);
+                mazeExitObject.mesh.geometry.dispose();
+                safeDisposeMaterial(mazeExitObject.mesh.material);
+                mazeExitObject.mesh.children[0].geometry.dispose();
+                safeDisposeMaterial(mazeExitObject.mesh.children[0].material);
+                mazeExitObject.light.dispose();
+                mazeExitObject = null;
+            }
+            mazeExit = null;
+
+            const size = (config.mazeComplexity % 2 === 0) ? config.mazeComplexity + 1 : config.mazeComplexity;
+            mazeGrid = mazeGen.generate(size);
+            await buildMazeGeometry();
+
+            // Render a single frame to ensure new geometry is drawn before flipping back
+            renderer.render(scene, camera);
+
+            container.style.transform = 'rotateY(0deg)';
+            await new Promise(resolve => setTimeout(resolve, 400));
+            container.style.transition = 'none';
+
+            mazeRegenerating = false;
+        }
+
         function updateTileUVs(mesh, ratio, colIndex) {
             const baseUVs = mesh.geometry.userData.baseUVs || tunnelGeometry.userData.baseUVs;
             const uvs = mesh.geometry.attributes.uv;
@@ -823,6 +1609,64 @@
                 uvs.setXY(i, u, v);
             }
             uvs.needsUpdate = true;
+        }
+
+        function updateMazeMap() {
+            const canvas = document.getElementById('maze-map');
+            
+            // Only show the map if we are in maze mode and the toggle is on
+            if (config.mode !== 'maze' || !config.showMazeMap || !mazeGrid) {
+                canvas.style.display = 'none';
+                return;
+            }
+            canvas.style.display = 'block';
+
+            const ctx = canvas.getContext('2d');
+            const size = mazeGrid.length;
+            const cellSize = canvas.width / size;
+
+            // Clear the previous frame
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 1. Draw the Walls
+            ctx.fillStyle = 'rgba(120, 120, 120, 0.8)';
+            for (let r = 0; r < size; r++) {
+                for (let c = 0; c < size; c++) {
+                    if (mazeGrid[r][c] === 1) {
+                        // Adding +0.5 prevents tiny gaps between canvas shapes
+                        ctx.fillRect(c * cellSize, r * cellSize, cellSize + 0.5, cellSize + 0.5); 
+                    }
+                }
+            }
+
+            // --- NEW: Draw the Exit Marker ---
+            if (mazeExit) {
+                ctx.fillStyle = 'rgba(0, 255, 255, 0.8)';
+                ctx.fillRect(mazeExit.col * cellSize, mazeExit.row * cellSize, cellSize, cellSize);
+            }
+
+            // 2. Draw the Player Marker
+            // Convert 3D World space back to 2D Grid space (add 0.5 offset to center within cell)
+            const mapX = (camera.position.x / MAZE_CELL_SIZE + 0.5) * cellSize;
+            const mapY = (camera.position.z / MAZE_CELL_SIZE + 0.5) * cellSize;
+
+            ctx.save();
+            ctx.translate(mapX, mapY);
+            
+            // Map the Three.js Y-rotation to the Canvas 2D rotation
+            ctx.rotate(-camera.rotation.y); 
+
+            // Draw a red "paper airplane" style directional arrow
+            ctx.fillStyle = '#ff4444';
+            ctx.beginPath();
+            ctx.moveTo(0, -cellSize * 0.8);             // Nose
+            ctx.lineTo(-cellSize * 0.5, cellSize * 0.6); // Back Left
+            ctx.lineTo(0, cellSize * 0.3);              // Indent
+            ctx.lineTo(cellSize * 0.5, cellSize * 0.6);  // Back Right
+            ctx.closePath();
+            ctx.fill();
+            
+            ctx.restore();
         }
 
         function animate() {
@@ -910,10 +1754,25 @@
                 }
                 gridLayers.forEach(group => {
                     group.position.z += moveDist;
-                    if (group.position.z > 150) { 
+                    if (group.position.z > 150) {
                         recycleGridLayer(group);
                     }
                 });
+            } else if (config.mode === 'maze') {
+                if (mazeGrid && mazeNav.phase !== 'idle' && !mazeRegenerating) {
+                    updateMazeCamera(dt);
+                }
+                // Floor and ceiling remain stationary to avoid texture sliding.
+                updateSpotlightAssignments();
+                
+                if (mazeExitObject) {
+                    mazeExitObject.mesh.rotation.y += dt;
+                    mazeExitObject.mesh.rotation.z += dt * 0.5;
+                    mazeExitObject.mesh.position.y = MAZE_CELL_SIZE * 0.6 + Math.sin(time * 2) * 1.5;
+                }
+
+                // Update the 2D map overlay
+                updateMazeMap();
             }
 
             lights.forEach(l => {
@@ -937,6 +1796,10 @@
         function setupLights() {
             lights.forEach(l => { scene.remove(l.mesh); scene.remove(l.light); });
             lights = [];
+            if (config.mode === 'maze') {
+                setupMazeSpotlights();
+                return;
+            }
             for (let i = 0; i < config.lightCount; i++) createMovingLight();
         }
 
@@ -971,8 +1834,14 @@
             // IMPORTANT: Update anisotropy immediately upon mode switch so cached textures are ready
             updateAnisotropy();
 
-            if (ambientLight) ambientLight.intensity = config.ambientIntensity; 
-            setupLights(); 
+            if (ambientLight) ambientLight.intensity = config.ambientIntensity;
+            if (newMode !== 'maze') {
+                setupLights();
+            } else {
+                // Clear any leftover moving lights; maze uses its own SpotLight pool
+                lights.forEach(l => { scene.remove(l.mesh); scene.remove(l.light); });
+                lights = [];
+            }
             for (const key in guiControllers) {
                 if(guiControllers[key]) guiControllers[key].updateDisplay();
             }
@@ -982,7 +1851,7 @@
         function setupGUI() {
             const gui = new GUI({ title: 'Settings' });
             
-            gui.add(config, 'mode', ['floating', 'tunnel', 'grid']).name('Display Mode').onChange(v => {
+            gui.add(config, 'mode', ['floating', 'tunnel', 'grid', 'maze']).name('Display Mode').onChange(v => {
                handleModeChange(v);
             });
 
@@ -1057,6 +1926,39 @@
             folderContent.add(config, 'uploadImages').name('📂 Upload Local Files');
             folderContent.add(config, 'clearImages').name('❌ Clear All Custom');
             
+            guiMazeFolder = gui.addFolder('Maze');
+            guiControllers.showMazeMap = guiMazeFolder.add(config, 'showMazeMap').name('Show Minimap');
+            guiControllers.mazeComplexity = guiMazeFolder.add(config, 'mazeComplexity', 11, 41, 2)
+                .name('Maze Size')
+                .onFinishChange(() => { if (config.mode === 'maze') rebuildScene(); });
+            guiControllers.mazeImageCount = guiMazeFolder.add(config, 'mazeImageCount', 5, 200, 1)
+                .name('Image Count')
+                .onFinishChange(() => { if (config.mode === 'maze') rebuildScene(); });
+            guiControllers.mazeSpotlightAngle = guiMazeFolder.add(config, 'mazeSpotlightAngle', 0.1, Math.PI / 2)
+                .name('Spotlight Size')
+                .onChange(() => { if (config.mode === 'maze') setupLights(); });
+            guiControllers.mazeSpotlightHeight = guiMazeFolder.add(config, 'mazeSpotlightHeight', 2.0, 15.0)
+                .name('Spotlight Height');
+            guiControllers.mazeShadowRes = guiMazeFolder.add(config, 'mazeShadowRes', [256, 512, 1024, 2048, 4096, 8192])
+                .name('Shadow Resolution')
+                .onChange(() => { if (config.mode === 'maze') setupLights(); });
+            guiControllers.mazeWalkingSpeed = guiMazeFolder.add(config, 'mazeWalkingSpeed', 0.2, 5.0)
+                .name('Walking Speed');
+            guiControllers.mazeTextureTiling = guiMazeFolder.add(config, 'mazeTextureTiling', 0.5, 8.0)
+                .name('Texture Tiling')
+                .onChange(() => { if (materialManager) materialManager.updateTiling(); });
+            guiControllers.navStyle = guiMazeFolder.add(config, 'navStyle', ['win95', 'modern'])
+                .name('Nav Style');
+            guiControllers.mazeWallTexture = guiMazeFolder.add(config, 'mazeWallTexture', config.availableTextures)
+                .name('Wall Texture')
+                .onChange(async v => { if (materialManager) await materialManager.load('wall', v); });
+            guiControllers.mazeFloorTexture = guiMazeFolder.add(config, 'mazeFloorTexture', config.availableTextures)
+                .name('Floor Texture')
+                .onChange(async v => { if (materialManager) await materialManager.load('floor', v); });
+            guiControllers.mazeCeilingTexture = guiMazeFolder.add(config, 'mazeCeilingTexture', config.availableTextures)
+                .name('Ceiling Texture')
+                .onChange(async v => { if (materialManager) await materialManager.load('ceiling', v); });
+
             const folderLight = gui.addFolder('Lighting & Performance');
             guiControllers.lightSpeed = folderLight.add(config, 'lightSpeed', 0, 30);
             guiControllers.ambientIntensity = folderLight.add(config, 'ambientIntensity', 0, 3).name('Ambient Brightness').onChange(v => {
@@ -1086,15 +1988,16 @@
             guiControllers.gridSpacing.hide();
             guiControllers.pathRandomness.hide();
             guiControllers.gridEdgeBuffer.hide();
+            if (guiMazeFolder) guiMazeFolder.hide();
 
             if (config.mode === 'tunnel') {
                 guiControllers.tunnelRotation.show();
-                guiControllers.tunnelRows.show(); 
+                guiControllers.tunnelRows.show();
                 guiControllers.tunnelRadius.show();
             } else if (config.mode === 'floating') {
                 guiControllers.spinSpeed.show();
                 guiControllers.noRotation.show();
-                guiControllers.totalImages.show(); 
+                guiControllers.totalImages.show();
                 guiControllers.tunnelRadius.show();
             } else if (config.mode === 'grid') {
                 guiControllers.gridCols.show();
@@ -1102,6 +2005,8 @@
                 guiControllers.gridSpacing.show();
                 guiControllers.pathRandomness.show();
                 guiControllers.gridEdgeBuffer.show();
+            } else if (config.mode === 'maze') {
+                if (guiMazeFolder) guiMazeFolder.show();
             }
         }
 

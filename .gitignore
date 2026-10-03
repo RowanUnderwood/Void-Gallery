@@ -1,0 +1,16 @@
+# Local image libraries. The repo keeps a small test set in these folders; local copies of
+# those tracked files are marked skip-worktree, everything else here is ignored.
+/images/
+/movieposters/
+/transparentimages/
+/AIimages/
+/textures/
+/models/
+
+# Local-only, generated or sensitive
+/.claude/
+/__pycache__/
+/Old versions/
+/Putty Access/
+/index - Copy.html.txt
+/pi-native/build/

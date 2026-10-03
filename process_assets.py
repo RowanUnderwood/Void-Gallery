@@ -7,11 +7,9 @@ from multiprocessing import Pool, cpu_count
 import shutil
 
 try:
-    from PIL import Image, ImageOps
-    from tqdm import tqdm
+    from PIL import Image
 except ImportError:
-    print("Error: Required libraries not found.")
-    print("Please run: pip install tqdm Pillow")
+    print("Error: Required libraries not found. Please run: pip install Pillow")
     exit(1)
 
 # --- CONFIGURATION ---
@@ -22,11 +20,9 @@ MANIFEST_FILENAME = "manifest.json"
 DRY_RUN = False 
 
 def ensure_dirs(base_dir):
-    """Creates main, halfres, and quarterres directories if they don't exist."""
     subdirs = ["halfres", "quarterres"]
     if not os.path.exists(base_dir):
-        print(f"Warning: Directory '{base_dir}' does not exist. Skipping.")
-        return False, []
+        return False, [], f"Warning: Directory '{base_dir}' does not exist. Skipping."
     
     paths = {
         "full": base_dir,
@@ -38,14 +34,11 @@ def ensure_dirs(base_dir):
         if not os.path.exists(paths[key]):
             os.makedirs(paths[key])
             
-    return True, paths
+    return True, paths, f"Validated directories for {base_dir}"
 
 def convert_and_resize(task_info):
-    """
-    Worker function. Returns (final_filename, original_filename) if successful.
-    """
+    """Worker function for multiprocessing."""
     src_full_path, filename, paths, is_dry_run = task_info
-    
     name_no_ext = os.path.splitext(filename)[0]
     final_name = name_no_ext + ".webp"
     
@@ -54,26 +47,23 @@ def convert_and_resize(task_info):
     quat_res_target = os.path.join(paths['quarter'], final_name)
 
     try:
-        if is_dry_run:
-            return (final_name, filename)
+        if is_dry_run: return (final_name, filename)
 
         src_mtime = os.path.getmtime(src_full_path)
         needs_process = True
         
         if os.path.exists(full_res_target):
-             dst_mtime = os.path.getmtime(full_res_target)
-             if src_mtime <= dst_mtime:
+             if src_mtime <= os.path.getmtime(full_res_target):
                  needs_process = False
 
         img = None
-        
         if needs_process or src_full_path != full_res_target:
              with Image.open(src_full_path) as img_src:
                 if src_full_path != full_res_target:
                     img_src.save(full_res_target, "webp", lossless=True)
         
         half_needs_update = True
-        if os.path.exists(half_res_target):
+        if os.path.exists(half_res_target) and os.path.exists(full_res_target):
              if os.path.getmtime(full_res_target) <= os.path.getmtime(half_res_target):
                  half_needs_update = False
 
@@ -84,7 +74,7 @@ def convert_and_resize(task_info):
             img_half.save(half_res_target, "webp", quality=85)
         
         quat_needs_update = True
-        if os.path.exists(quat_res_target):
+        if os.path.exists(quat_res_target) and os.path.exists(half_res_target):
              if os.path.getmtime(half_res_target) <= os.path.getmtime(quat_res_target):
                  quat_needs_update = False
         
@@ -96,15 +86,27 @@ def convert_and_resize(task_info):
                 img_quat.save(quat_res_target, "webp", quality=80)
 
     except Exception as e:
-        print(f"Error processing {filename}: {str(e)}")
-        return None
+        return f"ERROR:{filename}:{str(e)}"
 
     return (final_name, filename)
 
+def perform_rename_set(base_dir, src_name, dst_name):
+    dirs = [base_dir, os.path.join(base_dir, "halfres"), os.path.join(base_dir, "quarterres")]
+    if os.path.exists(os.path.join(base_dir, dst_name)): return False
+    success = True
+    for d in dirs:
+        s = os.path.join(d, src_name)
+        t = os.path.join(d, dst_name)
+        if os.path.exists(s):
+            if not DRY_RUN:
+                try:
+                    os.rename(s, t)
+                except OSError:
+                    success = False
+    return success
+
 def standardize_names_and_fill_gaps(base_dir, manifest):
-    """Renames files to 1.webp, 2.webp... and preserves manifest history."""
     files = [f for f in os.listdir(base_dir) if f.lower().endswith(TARGET_EXT)]
-    
     numbered_map = {} 
     others = []
     
@@ -116,146 +118,118 @@ def standardize_names_and_fill_gaps(base_dir, manifest):
             others.append(f)
             
     existing_nums = sorted(numbered_map.keys())
-    
     gaps = []
-    gap_moves = 0
+    
     if existing_nums:
         max_val = existing_nums[-1]
         existing_set = set(existing_nums)
         gaps = [i for i in range(1, max_val) if i not in existing_set]
-        gap_moves = min(len(gaps), len(existing_nums))
 
-    total_ops = gap_moves + len(others)
+    # Fill Gaps
+    if existing_nums and gaps:
+        curr_high = len(existing_nums) - 1
+        for gap in gaps:
+            if curr_high < 0: break
+            source_num = existing_nums[curr_high]
+            if source_num < gap: break 
+            
+            src_name = f"{source_num}{TARGET_EXT}"
+            dst_name = f"{gap}{TARGET_EXT}"
+            
+            if perform_rename_set(base_dir, src_name, dst_name):
+                if src_name in manifest:
+                    manifest[dst_name] = manifest.pop(src_name)
+            existing_nums[curr_high] = gap
+            curr_high -= 1
+            
+    # Rename new files
+    existing_nums = sorted(list(set(existing_nums)))
+    next_num = (existing_nums[-1] + 1) if existing_nums else 1
     
-    with tqdm(total=total_ops, desc="Standardizing", unit="file") as pbar:
-        # 1. Fill Gaps
-        if existing_nums and gaps:
-            curr_high = len(existing_nums) - 1
-            for gap in gaps:
-                if curr_high < 0: break
-                source_num = existing_nums[curr_high]
-                if source_num < gap: break 
-                
-                src_name = f"{source_num}{TARGET_EXT}"
-                dst_name = f"{gap}{TARGET_EXT}"
-                
-                if perform_rename_set(base_dir, src_name, dst_name):
-                    # Maintain the mapping to the original source file
-                    if src_name in manifest:
-                        manifest[dst_name] = manifest.pop(src_name)
-                    pbar.update(1)
-                        
-                existing_nums[curr_high] = gap
-                curr_high -= 1
-                
-        # 2. Rename new files ("others")
-        existing_nums = sorted(list(set(existing_nums)))
-        next_num = (existing_nums[-1] + 1) if existing_nums else 1
-        
-        for f in others:
-            new_name = f"{next_num}{TARGET_EXT}"
-            if perform_rename_set(base_dir, f, new_name):
-                 # Move original file reference to the new numbered key
-                 if f in manifest:
-                     manifest[new_name] = manifest.pop(f)
-                 else:
-                     # If it wasn't in manifest, it is its own source
-                     manifest[new_name] = f
-                 pbar.update(1)
-            next_num += 1
+    for f in others:
+        new_name = f"{next_num}{TARGET_EXT}"
+        if perform_rename_set(base_dir, f, new_name):
+             if f in manifest: manifest[new_name] = manifest.pop(f)
+             else: manifest[new_name] = f
+        next_num += 1
 
     return next_num - 1 
-
-def perform_rename_set(base_dir, src_name, dst_name):
-    dirs = [base_dir, os.path.join(base_dir, "halfres"), os.path.join(base_dir, "quarterres")]
-    if os.path.exists(os.path.join(base_dir, dst_name)):
-        return False
-
-    success = True
-    for d in dirs:
-        s = os.path.join(d, src_name)
-        t = os.path.join(d, dst_name)
-        if os.path.exists(s):
-            if not DRY_RUN:
-                try:
-                    os.rename(s, t)
-                except OSError as e:
-                    print(f"Error renaming {s} -> {t}: {e}")
-                    success = False
-    return success
 
 def update_config_and_manifest(base_dir, total_count, manifest):
     if DRY_RUN: return
     config_path = os.path.join(base_dir, CONFIG_FILENAME)
     data = {"totalImages": total_count, "lastUpdated": time.time(), "formats": ["full", "halfres", "quarterres"]}
-    with open(config_path, 'w') as f:
-        json.dump(data, f, indent=4)
+    with open(config_path, 'w') as f: json.dump(data, f, indent=4)
         
     manifest_path = os.path.join(base_dir, MANIFEST_FILENAME)
-    with open(manifest_path, 'w') as f:
-        json.dump(manifest, f, indent=4)
+    with open(manifest_path, 'w') as f: json.dump(manifest, f, indent=4)
 
-def process_directory(dir_name):
-    print(f"\n--- Processing: {dir_name} ---")
-    exists, paths = ensure_dirs(dir_name)
-    if not exists: return
-
-    manifest = {}
-    manifest_path = os.path.join(dir_name, MANIFEST_FILENAME)
-    if os.path.exists(manifest_path):
-        try:
-            with open(manifest_path, 'r') as f:
-                manifest = json.load(f)
-        except:
-            print("Could not load existing manifest, starting fresh.")
-
-    exts = ['*.png', '*.jpg', '*.jpeg', '*.webp']
-    all_files = []
-    for ext in exts:
-        all_files.extend(glob.glob(os.path.join(dir_name, ext)))
-        all_files.extend(glob.glob(os.path.join(dir_name, ext.upper())))
+def run_pipeline_stream(target_dirs=None):
+    """API entry point that yields progress strings."""
+    if target_dirs is None: target_dirs = TARGET_DIRS
+    yield f"--- Starting Optimized Asset Pipeline ---\nTargeting: {', '.join(target_dirs)}\n\n"
     
-    all_files = sorted(list(set(all_files)))
-    root_files = [f for f in all_files if os.path.dirname(f) == dir_name]
-    
-    # --- BUG FIX: Skip already standardized files and known sources ---
-    known_sources = set(manifest.values())
-    pending_files = []
-    for f in root_files:
-        fname = os.path.basename(f)
-        name_part, ext_part = os.path.splitext(fname)
-        
-        # 1. Skip if it's already a numeric standardized file
-        if name_part.isdigit() and ext_part.lower() == TARGET_EXT:
+    for dir_name in target_dirs:
+        yield f"▶ Processing Directory: {dir_name}\n"
+        exists, paths, msg = ensure_dirs(dir_name)
+        if not exists:
+            yield msg + "\n\n"
             continue
+
+        manifest = {}
+        manifest_path = os.path.join(dir_name, MANIFEST_FILENAME)
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, 'r') as f: manifest = json.load(f)
+            except: yield "  Could not load existing manifest, starting fresh.\n"
+
+        exts = ['*.png', '*.jpg', '*.jpeg', '*.webp']
+        all_files = []
+        for ext in exts:
+            all_files.extend(glob.glob(os.path.join(dir_name, ext)))
+            all_files.extend(glob.glob(os.path.join(dir_name, ext.upper())))
+        
+        all_files = sorted(list(set(all_files)))
+        root_files = [f for f in all_files if os.path.dirname(f) == dir_name]
+        
+        known_sources = set(manifest.values())
+        pending_files = []
+        for f in root_files:
+            fname = os.path.basename(f)
+            name_part, ext_part = os.path.splitext(fname)
+            if name_part.isdigit() and ext_part.lower() == TARGET_EXT: continue
+            if fname not in known_sources: pending_files.append(f)
+                
+        yield f"  Found {len(root_files)} total files ({len(pending_files)} new/untracked).\n"
+
+        if pending_files:
+            tasks = [(f_path, os.path.basename(f_path), paths, DRY_RUN) for f_path in pending_files]
+            yield "  Converting and generating mipmaps (half/quarter)...\n"
             
-        # 2. Skip if the filename is already recorded as a source
-        if fname not in known_sources:
-            pending_files.append(f)
-            
-    print(f"Found {len(root_files)} files ({len(pending_files)} new/untracked).")
+            with Pool(processes=cpu_count()) as pool:
+                processed_count = 0
+                for result in pool.imap_unordered(convert_and_resize, tasks):
+                    processed_count += 1
+                    if isinstance(result, str) and result.startswith("ERROR"):
+                        yield f"  [!] {result}\n"
+                    elif result:
+                        final_name, original_name = result
+                        if final_name not in manifest:
+                            manifest[final_name] = original_name
+                    
+                    if processed_count % max(1, len(tasks)//10) == 0 or processed_count == len(tasks):
+                        yield f"  Progress: {processed_count}/{len(tasks)} files processed...\n"
+        else:
+            yield "  No new files to convert.\n"
 
-    if pending_files:
-        tasks = [(f_path, os.path.basename(f_path), paths, DRY_RUN) for f_path in pending_files]
-        with Pool(processes=cpu_count()) as pool:
-            for result in tqdm(pool.imap_unordered(convert_and_resize, tasks), total=len(tasks), unit="img", desc="Converting"):
-                if result:
-                    final_name, original_name = result
-                    if final_name not in manifest:
-                        manifest[final_name] = original_name
-    else:
-        print("No new files to convert.")
+        yield "  Standardizing names and filling numerical gaps...\n"
+        total_images = standardize_names_and_fill_gaps(dir_name, manifest)
+        update_config_and_manifest(dir_name, total_images, manifest)
+        yield f"  Directory complete. Final sequential image count: {total_images}\n\n"
 
-    total_images = standardize_names_and_fill_gaps(dir_name, manifest)
-    update_config_and_manifest(dir_name, total_images, manifest)
-
-def main():
-    if __name__ == "__main__":
-        multiprocessing.freeze_support()
-        print("--- Starting Optimized Asset Pipeline ---")
-        for d in TARGET_DIRS:
-            process_directory(d)
-        print("\n--- Pipeline Complete ---")
+    yield "--- Pipeline Complete ---"
 
 if __name__ == "__main__":
-    main()
+    multiprocessing.freeze_support()
+    for log in run_pipeline_stream():
+        print(log, end="")
